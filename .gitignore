@@ -1,0 +1,54 @@
+# --- Unity ---
+SalmonUnity/[Ll]ibrary/
+SalmonUnity/[Tt]emp/
+SalmonUnity/[Oo]bj/
+SalmonUnity/[Bb]uild/
+SalmonUnity/[Bb]uilds/
+SalmonUnity/[Ll]ogs/
+SalmonUnity/[Uu]ser[Ss]ettings/
+SalmonUnity/.vs/
+SalmonUnity/.idea/
+SalmonUnity/*.csproj
+SalmonUnity/*.sln
+SalmonUnity/*.suo
+SalmonUnity/*.user
+SalmonUnity/*.pidb
+SalmonUnity/*.booproj
+SalmonUnity/*.svd
+SalmonUnity/*.pdb
+SalmonUnity/*.mdb
+SalmonUnity/*.opendb
+SalmonUnity/*.VC.db
+SalmonUnity/*.apk
+SalmonUnity/*.aab
+SalmonUnity/*.unitypackage
+SalmonUnity/crashlytics-build.properties
+SalmonUnity/sysinfo.txt
+
+# --- Python / vision ---
+__pycache__/
+*.pyc
+.venv/
+venv/
+.ipynb_checkpoints/
+runs/
+*.pt
+*.onnx
+
+# --- Videos y datasets pesados (no subir a git) ---
+vision/videos/
+vision/datasets/
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# --- Sistema / editores ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# --- Claude Code (config local) ---
+.claude/settings.local.json
+SalmonUnity/screenshot.png
