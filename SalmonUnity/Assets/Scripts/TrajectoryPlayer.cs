@@ -56,9 +56,67 @@ public class TrajectoryPlayer : MonoBehaviour
             go.name = $"Salmon_{id}";
             go.transform.localPosition = tracks[id][0].p;
             go.transform.rotation = UpstreamRotation();
+            // Collider simple para poder seleccionar el pez con un clic (raycast).
+            if (go.GetComponent<Collider>() == null)
+            {
+                var col = go.AddComponent<CapsuleCollider>();
+                col.direction = 2; // eje Z, a lo largo del cuerpo
+                col.radius = 0.25f;
+                col.height = 1.0f;
+            }
             fish[id] = go.transform;
+            fishIds.Add(id);
+            fishByTransform[go.transform] = id;
         }
+        fishIds.Sort();
         Debug.Log($"TrajectoryPlayer: {tracks.Count} peces, {Duration:F1} s");
+    }
+
+    // ---------- Consulta para el panel / selección ----------
+
+    public struct FishInfo
+    {
+        public int id;
+        public float apparentSpeed;   // m/s respecto a la cámara (velocidad con ventana)
+        public float cameraDistance;  // m, a partir de z (tamaño aparente)
+        public float height;          // m sobre el borde inferior de la imagen (de cy)
+    }
+
+    readonly List<int> fishIds = new();
+    readonly Dictionary<Transform, int> fishByTransform = new();
+
+    /// IDs de todos los peces del CSV, ordenados.
+    public IReadOnlyList<int> FishIds => fishIds;
+
+    public Transform GetFish(int id) => fish.TryGetValue(id, out var t) ? t : null;
+
+    public bool IsVisible(int id) => fish.TryGetValue(id, out var t) && t.gameObject.activeSelf;
+
+    /// Devuelve el ID del pez al que pertenece un transform (o uno de sus hijos).
+    public bool TryGetId(Transform t, out int id)
+    {
+        for (; t != null; t = t.parent)
+            if (fishByTransform.TryGetValue(t, out id)) return true;
+        id = -1;
+        return false;
+    }
+
+    /// Llena `into` con los peces visibles en el tiempo actual, ordenados por ID.
+    public void GetVisibleFish(List<FishInfo> into)
+    {
+        into.Clear();
+        foreach (int id in fishIds)
+        {
+            if (!IsVisible(id)) continue;
+            var p = fish[id].localPosition;
+            into.Add(new FishInfo
+            {
+                id = id,
+                apparentSpeed = Velocity(tracks[id], CurrentTime).magnitude,
+                cameraDistance = p.z,
+                height = p.y + cageHeight * 0.5f,
+            });
+        }
     }
 
     void Load(string path)

@@ -26,6 +26,8 @@ public static class SalmonSceneBuilder
 
         if (player.GetComponent<SalmonHud>() == null)
             player.gameObject.AddComponent<SalmonHud>().player = player;
+        if (player.GetComponent<SalmonPanel>() == null)
+            player.gameObject.AddComponent<SalmonPanel>().player = player;
     }
 
     static void SetupWater()
