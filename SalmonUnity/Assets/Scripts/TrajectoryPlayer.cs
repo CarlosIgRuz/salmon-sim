@@ -23,6 +23,16 @@ public class TrajectoryPlayer : MonoBehaviour
     public GameObject fishPrefab;
     public float turnSpeed = 6f;
 
+    [Header("Orientación")]
+    [Tooltip("Dirección 'aguas arriba' en el espacio local de la jaula. Los peces casi quietos miran hacia aquí.")]
+    public Vector3 upstreamDirection = Vector3.back; // (0,0,-1): hacia la cámara
+    [Tooltip("Velocidad (m/s) a partir de la cual el pez se orienta según su desplazamiento.")]
+    public float moveSpeedThreshold = 0.6f;
+    [Tooltip("Fracción del umbral bajo la cual vuelve a mirar aguas arriba (histéresis, evita parpadeo).")]
+    [Range(0f, 1f)] public float releaseFraction = 0.7f;
+    [Tooltip("Semiventana (s) para estimar la velocidad; filtra el temblor del tracker.")]
+    public float velocityWindow = 0.5f;
+
     [Header("Reproducción")]
     public bool playing = true;
     public float speed = 1f;
@@ -34,6 +44,7 @@ public class TrajectoryPlayer : MonoBehaviour
     // id -> lista ordenada de (tiempo, posición)
     readonly Dictionary<int, List<(float t, Vector3 p)>> tracks = new();
     readonly Dictionary<int, Transform> fish = new();
+    readonly HashSet<int> moving = new(); // peces que ahora siguen su dirección de movimiento
 
     void Start()
     {
@@ -44,6 +55,7 @@ public class TrajectoryPlayer : MonoBehaviour
                                         : CreatePlaceholder();
             go.name = $"Salmon_{id}";
             go.transform.localPosition = tracks[id][0].p;
+            go.transform.rotation = UpstreamRotation();
             fish[id] = go.transform;
         }
         Debug.Log($"TrajectoryPlayer: {tracks.Count} peces, {Duration:F1} s");
@@ -93,15 +105,41 @@ public class TrajectoryPlayer : MonoBehaviour
             tr.gameObject.SetActive(true);
             visible++;
 
-            Vector3 dir = pos - tr.localPosition;
             tr.localPosition = pos;
-            if (dir.sqrMagnitude > 1e-6f)
-            {
-                var target = Quaternion.LookRotation(transform.TransformDirection(dir));
-                tr.rotation = Quaternion.Slerp(tr.rotation, target, Time.deltaTime * turnSpeed);
-            }
+
+            // Velocidad suavizada en una ventana centrada: el desplazamiento
+            // frame a frame es casi todo ruido del tracker.
+            Vector3 vel = Velocity(kv.Value, CurrentTime);
+            float spd = vel.magnitude;
+            bool isMoving = moving.Contains(kv.Key)
+                ? spd > moveSpeedThreshold * releaseFraction
+                : spd > moveSpeedThreshold;
+            if (isMoving) moving.Add(kv.Key); else moving.Remove(kv.Key);
+
+            var target = isMoving
+                ? Quaternion.LookRotation(transform.TransformDirection(vel))
+                : UpstreamRotation();
+            float k = 1f - Mathf.Exp(-turnSpeed * Time.deltaTime); // independiente del framerate
+            tr.rotation = Quaternion.Slerp(tr.rotation, target, k);
         }
         VisibleCount = visible;
+    }
+
+    Quaternion UpstreamRotation()
+    {
+        var dir = upstreamDirection.sqrMagnitude > 1e-6f ? upstreamDirection : Vector3.back;
+        return Quaternion.LookRotation(transform.TransformDirection(dir));
+    }
+
+    /// Velocidad (m/s, espacio local) por diferencia centrada en [t-w, t+w],
+    /// recortada a los tramos donde el pez está en cuadro.
+    Vector3 Velocity(List<(float t, Vector3 p)> l, float t)
+    {
+        float w = Mathf.Max(velocityWindow, 0.01f);
+        float t0 = Mathf.Max(t - w, l[0].t), t1 = Mathf.Min(t + w, l[^1].t);
+        if (t1 - t0 < 1e-3f) return Vector3.zero;
+        if (!Sample(l, t0, out var p0) || !Sample(l, t1, out var p1)) return Vector3.zero;
+        return (p1 - p0) / (t1 - t0);
     }
 
     /// Interpola la posición en el tiempo t. Devuelve false si el pez no está

@@ -52,3 +52,6 @@ Thumbs.db
 # --- Claude Code (config local) ---
 .claude/settings.local.json
 SalmonUnity/screenshot.png
+
+# --- Claude Code (config local por usuario) ---
+**/.claude/settings.local.json

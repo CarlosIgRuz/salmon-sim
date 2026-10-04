@@ -1,7 +1,1 @@
-{
-  "fps": 25,
-  "width": 1920,
-  "height": 1080,
-  "frames": 750,
-  "source": "synthetic"
-}
+{"fps": 29.97002997002997, "width": 1280, "height": 720, "frames": 901, "source": "katmai_30s.mp4"}
