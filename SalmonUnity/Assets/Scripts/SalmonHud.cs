@@ -15,7 +15,7 @@ public class SalmonHud : MonoBehaviour
 
         float pad = Screen.height * 0.02f;
         float line = style.fontSize * 1.4f;
-        var r = new Rect(pad, pad, Screen.width * 0.7f, line);
+        var r = new Rect(pad, pad + FarmUi.TopInset, Screen.width * 0.7f, line);
         GUI.Label(r, $"Salmones visibles: {player.VisibleCount}", style);
         r.y += line;
         GUI.Label(r, $"Tiempo: {player.CurrentTime:F1} / {player.Duration:F1} s", style);

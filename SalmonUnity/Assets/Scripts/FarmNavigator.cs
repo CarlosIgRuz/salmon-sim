@@ -14,6 +14,11 @@ public class FarmNavigator : MonoBehaviour
     public SalmonFarmBuilder farm;
     public FarmCamera cam;
     public SalmonPanel panel;
+    public FarmConditions conditions;
+    [Header("Cámara en jaulas simuladas (más alta y en diagonal para ver el anillo)")]
+    public float simCageYaw = 45f;
+    public float simCagePitch = 40f; // se limita para no salir del agua
+    public float simCageDistance = 14f;
     [Tooltip("Si es >= 0, fuerza el hover sobre esa jaula (pruebas sin mouse)")]
     public int forcedHover = -1;
 
@@ -49,13 +54,21 @@ public class FarmNavigator : MonoBehaviour
         SetHover(null);
         Current = cage;
         SetPickColliders(false); // si no, el collider de la jaula tapa los clics sobre los peces
-        cam.FlyToCage(cage.FocusWorld, OnSurface, () =>
+        System.Action arrive = () =>
         {
             farm.Isolate(cage);
             farm.SetUnderwater(true);
             if (cage.school != null) cage.school.fullQuality = true;
             ShowCageUi(true);
-        });
+        };
+        if (cage.school != null)
+        {
+            // Mira al anillo desde arriba en diagonal: el foco baja a la profundidad del cardumen.
+            float depth = Mathf.Min(cage.school.profile.preferredDepth + 0.5f, cage.netDepth - 1f);
+            var focus = cage.transform.TransformPoint(new Vector3(0f, -depth, 0f));
+            cam.FlyToCage(focus, OnSurface, arrive, simCageYaw, simCagePitch, simCageDistance);
+        }
+        else cam.FlyToCage(cage.FocusWorld, OnSurface, arrive);
     }
 
     public void ExitCage()
@@ -132,6 +145,7 @@ public class FarmNavigator : MonoBehaviour
     bool IsOverUi(Vector2 guiPos)
     {
         if (Current != null && backRect.Contains(guiPos)) return true;
+        if (conditions != null && conditions.IsOverUi(guiPos)) return true;
         return Current != null && panel != null && panel.PanelRect.Contains(guiPos);
     }
 
@@ -143,10 +157,10 @@ public class FarmNavigator : MonoBehaviour
         InitStyles();
         var e = Event.current;
 
-        if (e.type == EventType.KeyDown && e.keyCode == KeyCode.Escape && Current != null)
+        if (e.type == EventType.KeyDown && e.keyCode == KeyCode.Escape)
         {
-            ExitCage();
-            e.Use();
+            if (conditions != null && conditions.ShowAssumptions) { conditions.ShowAssumptions = false; e.Use(); }
+            else if (Current != null) { ExitCage(); e.Use(); }
         }
 
         float fs = Mathf.Max(11f, Screen.height / 52f);
@@ -167,14 +181,14 @@ public class FarmNavigator : MonoBehaviour
     {
         backRect = Rect.zero;
         if (e.type == EventType.Repaint)
-            SetHover(forcedHover >= 0 && forcedHover < farm.Cages.Count ? farm.Cages[forcedHover] : CageUnder(e.mousePosition));
+            SetHover(forcedHover >= 0 && forcedHover < farm.Cages.Count ? farm.Cages[forcedHover]
+                     : IsOverUi(e.mousePosition) ? null : CageUnder(e.mousePosition));
 
-        foreach (var c in farm.Cages)
-            if (c.gameObject.activeInHierarchy && c != Hovered)
-                DrawCageLabel(c, label);
+        // Con la ventana de supuestos abierta no se dibujan etiquetas ni tooltip encima.
+        if (conditions != null && conditions.ShowAssumptions) { SetHover(null); return; }
+        DrawCageLabels();
         if (Hovered != null)
         {
-            DrawCageLabel(Hovered, labelHover);
             // Tooltip junto al cursor (o bajo la etiqueta si el hover es forzado)
             var tip = new GUIContent($"{Hovered.displayName}  ·  clic para entrar\n{Hovered.description}");
             var ts = hint.CalcSize(tip);
@@ -194,6 +208,7 @@ public class FarmNavigator : MonoBehaviour
     {
         if (Current == null) return;
         float pad = Screen.height * 0.02f;
+        float top = FarmUi.TopInset + pad;
         var bc = new GUIContent("← Volver   (Esc)");
         var bs = button.CalcSize(bc);
         backRect = new Rect(pad, Screen.height - pad - bs.y * 1.3f, bs.x + fs * 1.5f, bs.y * 1.3f);
@@ -206,14 +221,21 @@ public class FarmNavigator : MonoBehaviour
         var ssz = sub.CalcSize(sc);
         float w = Mathf.Max(tsz.x, ssz.x);
         float x = (Screen.width - w) * 0.5f;
-        GUI.Label(new Rect(x, pad, w, tsz.y), tc, title);
-        GUI.Label(new Rect(x, pad + tsz.y, w, ssz.y), sc, sub);
+        GUI.Label(new Rect(x, top, w, tsz.y), tc, title);
+        GUI.Label(new Rect(x, top + tsz.y, w, ssz.y), sc, sub);
         if (!string.IsNullOrEmpty(Current.dataLabel))
         {
             var style = Current.isRealData ? badgeReal : badgeSim;
             var bcont = new GUIContent(Current.dataLabel);
             var bsz = style.CalcSize(bcont);
-            GUI.Label(new Rect((Screen.width - bsz.x) * 0.5f, pad + tsz.y + ssz.y + fs * 0.3f, bsz.x, bsz.y), bcont, style);
+            GUI.Label(new Rect((Screen.width - bsz.x) * 0.5f, top + tsz.y + ssz.y + fs * 0.3f, bsz.x, bsz.y), bcont, style);
+        }
+
+        // Perfil térmico con la profundidad del cardumen (solo jaulas simuladas)
+        if (Current.school != null && conditions != null)
+        {
+            var r = new Rect(pad + fs * 0.8f, top + fs * 3f, fs * 1.3f, Screen.height * 0.38f);
+            conditions.DrawThermalWidget(r, Current.netDepth, Current.school.GetStats().meanDepth, fs);
         }
 
         if (Current.Source == null)
@@ -234,20 +256,55 @@ public class FarmNavigator : MonoBehaviour
         return new Vector2(sp.x, Screen.height - sp.y);
     }
 
-    /// Nombre de la jaula y, debajo, la etiqueta de origen de los datos (verde: real, naranja: simulación).
-    void DrawCageLabel(FarmCage c, GUIStyle nameStyle)
+    readonly System.Collections.Generic.List<(FarmCage cage, Rect box, float nameH)> labelBoxes = new();
+
+    /// Nombre de cada jaula y, debajo, la etiqueta de origen de los datos (verde: real,
+    /// naranja: simulación). Las etiquetas que se pisan se suben hasta quedar libres.
+    void DrawCageLabels()
     {
-        var sp = cam.Cam.WorldToScreenPoint(c.LabelWorld);
-        if (sp.z <= 0f) return;
-        var nc = new GUIContent(c.displayName);
-        var ns = nameStyle.CalcSize(nc);
-        float y = Screen.height - sp.y - ns.y;
-        GUI.Label(new Rect(sp.x - ns.x * 0.5f, y, ns.x, ns.y), nc, nameStyle);
-        if (string.IsNullOrEmpty(c.dataLabel)) return;
-        var style = c.isRealData ? badgeReal : badgeSim;
-        var bc = new GUIContent(c.dataLabel);
-        var bs = style.CalcSize(bc);
-        GUI.Label(new Rect(sp.x - bs.x * 0.5f, y + ns.y, bs.x, bs.y), bc, style);
+        labelBoxes.Clear();
+        foreach (var c in farm.Cages)
+        {
+            if (!c.gameObject.activeInHierarchy) continue;
+            var sp = cam.Cam.WorldToScreenPoint(c.LabelWorld);
+            if (sp.z <= 0f) continue;
+            var ns = (c == Hovered ? labelHover : label).CalcSize(new GUIContent(c.displayName));
+            var bs = string.IsNullOrEmpty(c.dataLabel) ? Vector2.zero
+                   : (c.isRealData ? badgeReal : badgeSim).CalcSize(new GUIContent(c.dataLabel));
+            float w = Mathf.Max(ns.x, bs.x), h = ns.y + bs.y;
+            labelBoxes.Add((c, new Rect(sp.x - w * 0.5f, Screen.height - sp.y - h, w, h), ns.y));
+        }
+        // De abajo hacia arriba en pantalla (las más cercanas primero): cada una sube si choca con otra ya ubicada.
+        labelBoxes.Sort((a, b) => b.box.y.CompareTo(a.box.y));
+        for (int i = 0; i < labelBoxes.Count; i++)
+        {
+            var item = labelBoxes[i];
+            for (int guard = 0; guard < 20; guard++)
+            {
+                bool moved = false;
+                for (int k = 0; k < i; k++)
+                {
+                    var other = labelBoxes[k].box;
+                    if (!item.box.Overlaps(other)) continue;
+                    item.box.y = other.y - item.box.height - 3f;
+                    moved = true;
+                }
+                if (!moved) break;
+            }
+            labelBoxes[i] = item;
+        }
+        foreach (var (c, box, nameH) in labelBoxes)
+        {
+            var nameStyle = c == Hovered ? labelHover : label;
+            var nc = new GUIContent(c.displayName);
+            var ns = nameStyle.CalcSize(nc);
+            GUI.Label(new Rect(box.center.x - ns.x * 0.5f, box.y, ns.x, nameH), nc, nameStyle);
+            if (string.IsNullOrEmpty(c.dataLabel)) continue;
+            var style = c.isRealData ? badgeReal : badgeSim;
+            var bc = new GUIContent(c.dataLabel);
+            var bs = style.CalcSize(bc);
+            GUI.Label(new Rect(box.center.x - bs.x * 0.5f, box.y + nameH, bs.x, bs.y), bc, style);
+        }
     }
 
     void DrawWorldLabel(Vector3 world, string text, GUIStyle style)

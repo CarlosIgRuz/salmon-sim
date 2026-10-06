@@ -5,7 +5,8 @@ using UnityEngine.Rendering;
 /// <summary>
 /// Cardumen simulado (boids) dentro de una jaula cuadrada. Reglas: separación,
 /// alineación, cohesión, evitar la red (fuerza suave + límite duro: nunca la cruzan),
-/// profundidad preferida y giro en anillo alrededor del centro.
+/// profundidad preferida, giro en anillo alrededor del centro y, si el perfil lo
+/// indica, alimentación (pellets que caen desde el centro; los peces con apetito los siguen).
 /// Coordenadas locales de la jaula: superficie en y=0, red en |x|,|z| ≤ halfSize,
 /// fondo en y = -netDepth.
 /// Rendimiento: vecinos con grilla espacial; todos los peces se dibujan con una
@@ -31,6 +32,19 @@ public class FishSchool : MonoBehaviour, IFishSource
     [Tooltip("Distancia mínima (m) a la red, al fondo y a la superficie: nunca se cruza")]
     public float hardMargin = 0.35f;
 
+    [Header("Alimentación")]
+    [Tooltip("Velocidad de caída del pellet (m/s). Supuesto sin fuente.")]
+    public float pelletSinkSpeed = 0.1f;
+    [Tooltip("Radio (m) del área donde cae el alimento, alrededor del centro")]
+    public float feedRadius = 2.5f;
+    public int maxPellets = 400;
+
+    [Header("Condiciones (las fija FarmConditions)")]
+    [Tooltip("Texto de alimentación para el panel")]
+    public string feedingNote = "";
+    /// Temperatura del agua (°C) según la profundidad (m); null = sin perfil térmico.
+    public System.Func<float, float> temperatureAt;
+
     /// Perfil en uso (el objetivo, o una mezcla durante BlendTo).
     public BehaviorProfile Current { get; private set; }
     public int ActiveCount { get; private set; }
@@ -45,6 +59,17 @@ public class FishSchool : MonoBehaviour, IFishSource
     int selected = -1;
     BehaviorProfile blendFrom;
     float blendT = 1f, blendDuration;
+    Vector3[] pellets;
+    Matrix4x4[] pelletMatrices;
+    int pelletCount;
+    float pelletAccum;
+    Vector3 pelletCentroid;
+    System.Random pelletRnd;
+    readonly List<float> depthScratch = new();
+    SchoolStats cachedStats;
+    int cachedFrame = -1;
+
+    static Material pelletMat;
 
     static Material fishMat, dimMat, highlightMat;
     static readonly int BaseColorId = Shader.PropertyToID("_BaseColor");
@@ -82,6 +107,9 @@ public class FishSchool : MonoBehaviour, IFishSource
         speedU = new float[n]; depthU = new float[n]; sizeMul = new float[n];
         matrices = new Matrix4x4[n];
         cellOf = new int[n]; sorted = new int[n];
+        pellets = new Vector3[maxPellets];
+        pelletMatrices = new Matrix4x4[maxPellets];
+        pelletRnd = new System.Random(seed + 7);
 
         var rnd = new System.Random(seed);
         float R() => (float)rnd.NextDouble();
@@ -107,7 +135,11 @@ public class FishSchool : MonoBehaviour, IFishSource
         UpdateProfile(dt);
         int want = Mathf.Clamp(Mathf.RoundToInt(Current.fishCount), 0, pos.Length);
         ActiveCount = fullQuality ? want : Mathf.Min(want, liteFishCount);
-        if (dt > 0f) Step(ActiveCount, dt, Current);
+        if (dt > 0f)
+        {
+            UpdatePellets(dt, Current);
+            Step(ActiveCount, dt, Current);
+        }
         Render(ActiveCount);
     }
 
@@ -188,8 +220,22 @@ public class FishSchool : MonoBehaviour, IFishSource
                 var want = Tangent(p) * desired + radial / r * ((ringR - r) * 0.4f);
                 acc += (want - flat) * (P.circlingWeight * 0.5f);
             }
+            // Alimentación: la fracción `appetite` de los peces (los de depthU más bajo) va hacia el alimento.
+            if (pelletCount > 0 && (depthU[i] + 1f) * 0.5f < P.appetite)
+            {
+                // Cada pez con apetito sigue "su" pellet: se reparten en vez de ir todos al mismo punto.
+                var toFood = pellets[(i * 7919) % pelletCount] - p;
+                float dist = toFood.magnitude;
+                if (dist > 0.2f) acc += (toFood / dist * desired * 1.3f - v) * 1.5f;
+            }
+            if (P.wander > 0f)
+            {
+                float tt = Time.time * 0.35f;
+                acc += new Vector3(Mathf.PerlinNoise(tt, i * 1.37f) - 0.5f, 0f,
+                                   Mathf.PerlinNoise(i * 1.37f, tt + 50f) - 0.5f) * (2f * P.wander);
+            }
             float sp = v.magnitude;
-            if (sp > 1e-3f) acc += v / sp * (desired - sp);
+            if (sp > 1e-3f) acc += v / sp * ((desired - sp) * 2f);
             acc = Vector3.ClampMagnitude(acc, P.maxAccel);
 
             // --- Red, fondo y superficie: empuje suave que crece al acercarse (no se limita)
@@ -201,9 +247,9 @@ public class FishSchool : MonoBehaviour, IFishSource
             v += acc * dt;
             // Los salmones nadan casi horizontales; velocidad acotada.
             float hs = new Vector2(v.x, v.z).magnitude;
-            v.y = Mathf.Clamp(v.y, -0.35f * hs - 0.05f, 0.35f * hs + 0.05f);
+            v.y = Mathf.Clamp(v.y, -0.6f * hs - 0.08f, 0.6f * hs + 0.08f);
             sp = v.magnitude;
-            float lo = desired * 0.35f, hi = desired * 2f + 0.2f;
+            float lo = desired * 0.6f, hi = desired * 1.4f;
             if (sp < lo) v = (sp > 1e-4f ? v / sp : Tangent(p)) * lo;
             else if (sp > hi) v *= hi / sp;
 
@@ -221,6 +267,37 @@ public class FishSchool : MonoBehaviour, IFishSource
             vel[i] = v;
             if (v.sqrMagnitude > 1e-6f) rot[i] = Quaternion.Slerp(rot[i], Quaternion.LookRotation(v), turn);
         }
+    }
+
+    /// Pellets: caen a pelletSinkSpeed desde la superficie, en el área central; un pez a
+    /// menos de 1,5 largos de cuerpo se lo come. Solo en la jaula abierta.
+    void UpdatePellets(float dt, BehaviorProfile P)
+    {
+        if (!fullQuality) { pelletCount = 0; pelletAccum = 0f; return; }
+        pelletAccum += P.feedRate * dt;
+        while (pelletAccum >= 1f && pelletCount < pellets.Length)
+        {
+            pelletAccum -= 1f;
+            float a = (float)pelletRnd.NextDouble() * Mathf.PI * 2f;
+            float r = feedRadius * Mathf.Sqrt((float)pelletRnd.NextDouble());
+            pellets[pelletCount++] = new Vector3(Mathf.Cos(a) * r, -0.15f, Mathf.Sin(a) * r);
+        }
+        pelletAccum = Mathf.Min(pelletAccum, 1f);
+        if (pelletCount == 0) return;
+        float eat2 = Mathf.Pow(Mathf.Max(0.3f, P.fishLength * 1.5f), 2f);
+        var sum = Vector3.zero;
+        for (int k = 0; k < pelletCount; k++)
+        {
+            var q = pellets[k];
+            q.y -= pelletSinkSpeed * dt;
+            bool gone = q.y < -netDepth + 0.1f;
+            for (int i = 0; !gone && i < ActiveCount; i++)
+                gone = (pos[i] - q).sqrMagnitude < eat2;
+            if (gone) { pellets[k] = pellets[--pelletCount]; k--; continue; }
+            pellets[k] = q;
+            sum += q;
+        }
+        if (pelletCount > 0) pelletCentroid = sum / pelletCount;
     }
 
     /// 0 lejos de la pared; crece cuadráticamente hasta 1 al tocarla (d = distancia).
@@ -272,6 +349,10 @@ public class FishSchool : MonoBehaviour, IFishSource
         fishMat = new Material(sh) { name = "Salmon (instanciado)", enableInstancing = true };
         dimMat = new Material(fishMat) { name = "Salmon (atenuado)" };
         highlightMat = new Material(fishMat) { name = "Salmon (resaltado)" };
+        pelletMat = new Material(fishMat) { name = "Pellet" };
+        pelletMat.SetColor(BaseColorId, new Color(0.45f, 0.28f, 0.12f));
+        pelletMat.SetColor(BellyColorId, new Color(0.55f, 0.36f, 0.16f));
+        pelletMat.SetFloat("_WagAmp", 0f);
     }
 
     void Render(int n)
@@ -297,6 +378,15 @@ public class FishSchool : MonoBehaviour, IFishSource
             layer = gameObject.layer,
         };
         if (k > 0) Graphics.RenderMeshInstanced(rp, mesh, 0, matrices, k);
+        if (pelletCount > 0)
+        {
+            // Pellets exagerados (8 cm) para que se vean desde la cámara.
+            for (int q = 0; q < pelletCount; q++)
+                pelletMatrices[q] = l2w * Matrix4x4.TRS(pellets[q], Quaternion.identity, Vector3.one * 0.08f);
+            var prp = rp;
+            prp.material = pelletMat;
+            Graphics.RenderMeshInstanced(prp, FarmKit.Sphere, 0, pelletMatrices, pelletCount);
+        }
         if (selected >= 0 && selected < n)
         {
             rp.material = highlightMat;
@@ -312,7 +402,9 @@ public class FishSchool : MonoBehaviour, IFishSource
         "Simulación (boids): separación, alineación, cohesión, evitar la red, profundidad " +
         "preferida y giro en anillo. Los parámetros son supuestos, no mediciones.\n" +
         "Velocidad: rapidez de nado. Profundidad: bajo la superficie. Dist. al centro: horizontal, " +
-        "al eje de la jaula.\nClic en una fila o en un pez para resaltarlo; otro clic lo deselecciona.";
+        "al eje de la jaula.\nPolarización: todos hacia el mismo lado. Orden de rotación: todos giran en el " +
+        "mismo sentido (alto en un anillo). Concentración: densidad a ±1 m de la profundidad mediana vs. la media.\n" +
+        "Clic en una fila o en un pez para resaltarlo; otro clic lo deselecciona.";
 
     public void GetRows(List<FishRow> into)
     {
@@ -327,23 +419,43 @@ public class FishSchool : MonoBehaviour, IFishSource
             });
     }
 
+    /// Resumen (se calcula una vez por frame aunque lo pidan varios).
     public SchoolStats GetStats()
     {
-        var st = new SchoolStats { count = ActiveCount };
-        if (ActiveCount == 0) return st;
-        var dirSum = Vector3.zero;
+        if (cachedFrame == Time.frameCount) return cachedStats;
+        cachedFrame = Time.frameCount;
+        var st = new SchoolStats { count = ActiveCount, directionValid = true };
+        depthScratch.Clear();
         for (int i = 0; i < ActiveCount; i++)
         {
-            float s = vel[i].magnitude;
-            st.meanSpeed += s;
+            st.meanSpeed += vel[i].magnitude;
             st.meanDepth += -pos[i].y;
-            if (s > 1e-4f) dirSum += vel[i] / s;
+            depthScratch.Add(-pos[i].y);
         }
-        st.meanSpeed /= ActiveCount;
-        st.meanDepth /= ActiveCount;
-        st.polarization = dirSum.magnitude / ActiveCount;
-        return st;
+        if (ActiveCount > 0)
+        {
+            st.meanSpeed /= ActiveCount;
+            st.meanDepth /= ActiveCount;
+            FishMetrics.Direction(pos, vel, ActiveCount, out st.polarization, out st.rotation);
+            st.concentration = FishMetrics.VerticalConcentration(depthScratch, netDepth);
+        }
+        return cachedStats = st;
     }
+
+    public string StatusLine
+    {
+        get
+        {
+            var st = GetStats();
+            string temp = temperatureAt != null
+                ? $"Agua a {st.meanDepth:F1} m: {temperatureAt(st.meanDepth):F1} °C (cómodo 8–20 °C)"
+                : "Sin perfil térmico";
+            return string.IsNullOrEmpty(feedingNote) ? temp : temp + "\n" + feedingNote;
+        }
+    }
+
+    /// Pellets en el agua (para pruebas).
+    public int PelletCount => pelletCount;
 
     public bool TryPick(Ray ray, out int id)
     {

@@ -3,7 +3,8 @@ using UnityEngine;
 
 /// <summary>
 /// Panel derecho (IMGUI) de la jaula abierta: resumen (nº de peces, velocidad y
-/// profundidad medias, polarización), tabla de salmones y selección (clic en una
+/// profundidad medias, polarización, orden de rotación, concentración vertical),
+/// tabla de salmones y selección (clic en una
 /// fila o sobre un pez en 3D lo resalta en amarillo y atenúa al resto).
 /// Funciona con cualquier <see cref="IFishSource"/>: datos reales (TrajectoryPlayer)
 /// o simulación (FishSchool). Solo dibuja las filas visibles del scroll, así que
@@ -46,6 +47,7 @@ public class SalmonPanel : MonoBehaviour
 
     readonly List<FishRow> rows = new();
     SchoolStats stats;
+    string status;
     float nextRefresh;
     Vector2 scroll;
     float viewHeight = 400f;
@@ -65,6 +67,7 @@ public class SalmonPanel : MonoBehaviour
             nextRefresh = Time.unscaledTime + refreshInterval;
             source.GetRows(rows);
             stats = source.GetStats();
+            status = source.StatusLine;
         }
         source.SetSelection(SelectedId, highlightColor, highlightEmission, dimFactor);
     }
@@ -94,9 +97,10 @@ public class SalmonPanel : MonoBehaviour
 
     // ---------- Interfaz ----------
 
+    GUIStyle cellText, cellTextSel;
     GUIStyle title, header, cell, cellSel, note, rowBg, rowBgSel, panelBg, tile, tileValue, tileLabel;
     Texture2D texPanel, texRowSel, texRowHover, texTile, texBar, texBarBg;
-    static readonly float[] ColW = { 0.16f, 0.28f, 0.28f, 0.28f };
+    static readonly float[] ColW = { 0.12f, 0.36f, 0.26f, 0.26f };
 
     static Texture2D Solid(Color c)
     {
@@ -119,15 +123,18 @@ public class SalmonPanel : MonoBehaviour
         title = new GUIStyle(GUI.skin.label) { fontStyle = FontStyle.Bold, normal = { textColor = Color.white } };
         header = new GUIStyle(GUI.skin.label) { fontStyle = FontStyle.Bold, alignment = TextAnchor.LowerCenter,
                                                 wordWrap = true, normal = { textColor = new Color(0.7f, 0.9f, 1f) } };
-        cell = new GUIStyle(GUI.skin.label) { alignment = TextAnchor.MiddleCenter, normal = { textColor = Color.white } };
+        cell = new GUIStyle(GUI.skin.label) { alignment = TextAnchor.MiddleCenter, wordWrap = false, clipping = TextClipping.Clip,
+                                              normal = { textColor = Color.white } };
         cellSel = new GUIStyle(cell) { fontStyle = FontStyle.Bold, normal = { textColor = new Color(1f, 0.95f, 0.6f) } };
+        cellText = new GUIStyle(cell) { normal = { textColor = new Color(0.75f, 0.85f, 0.9f) } };
+        cellTextSel = new GUIStyle(cellSel);
         note = new GUIStyle(GUI.skin.label) { wordWrap = true, normal = { textColor = new Color(0.75f, 0.85f, 0.9f) } };
         rowBg = new GUIStyle { hover = { background = texRowHover } };
         rowBgSel = new GUIStyle { normal = { background = texRowSel }, hover = { background = texRowSel } };
         tile = new GUIStyle { normal = { background = texTile } };
-        tileValue = new GUIStyle(GUI.skin.label) { fontStyle = FontStyle.Bold, alignment = TextAnchor.UpperLeft,
+        tileValue = new GUIStyle(GUI.skin.label) { fontStyle = FontStyle.Bold, alignment = TextAnchor.UpperLeft, wordWrap = false,
                                                    normal = { textColor = Color.white } };
-        tileLabel = new GUIStyle(GUI.skin.label) { alignment = TextAnchor.UpperLeft, wordWrap = false,
+        tileLabel = new GUIStyle(GUI.skin.label) { alignment = TextAnchor.UpperLeft, wordWrap = true,
                                                    normal = { textColor = new Color(0.7f, 0.9f, 1f) } };
     }
 
@@ -139,13 +146,17 @@ public class SalmonPanel : MonoBehaviour
         float fs = Mathf.Max(11f, Screen.height / 50f);
         title.fontSize = Mathf.RoundToInt(fs * 1.15f);
         header.fontSize = cell.fontSize = cellSel.fontSize = Mathf.RoundToInt(fs);
-        note.fontSize = tileLabel.fontSize = Mathf.RoundToInt(fs * 0.85f);
-        tileValue.fontSize = Mathf.RoundToInt(fs * 1.25f);
+        note.fontSize = Mathf.RoundToInt(fs * 0.85f);
+        tileLabel.fontSize = Mathf.RoundToInt(fs * 0.75f);
+        tileValue.fontSize = Mathf.RoundToInt(fs * 1.1f);
+        cellText.fontSize = Mathf.RoundToInt(fs * 0.8f);
+        cellTextSel.fontSize = cellText.fontSize;
         float rowH = fs * 1.7f;
 
         float pad = Screen.height * 0.02f;
         float w = Mathf.Clamp(Screen.width * 0.30f, 280f, 560f);
-        panelRect = new Rect(Screen.width - w - pad, pad, w, Screen.height - 2f * pad);
+        float top = pad + FarmUi.TopInset;
+        panelRect = new Rect(Screen.width - w - pad, top, w, Screen.height - top - pad);
 
         // Clic fuera del panel (sin arrastrar, que rota la cámara): seleccionar un pez en 3D.
         var e = Event.current;
@@ -165,7 +176,8 @@ public class SalmonPanel : MonoBehaviour
 
         GUILayout.Label("Resumen de la jaula", title);
         DrawSummary(areaW, fs);
-        GUILayout.Space(fs * 0.5f);
+        if (!string.IsNullOrEmpty(status)) GUILayout.Label(status, note);
+        GUILayout.Space(fs * 0.3f);
 
         // Encabezado
         var hr = GUILayoutUtility.GetRect(areaW, fs * 4.2f); // hasta 3 líneas
@@ -191,10 +203,10 @@ public class SalmonPanel : MonoBehaviour
             var rr = new Rect(all.x, all.y + i * rowH, rowW, rowH);
             if (GUI.Button(rr, GUIContent.none, sel ? rowBgSel : rowBg)) Toggle(f.id);
             vals[0] = f.id.ToString();
-            vals[1] = f.c1.ToString("F2");
+            vals[1] = f.c1Text ?? f.c1.ToString("F2");
             vals[2] = f.c2.ToString("F1");
             vals[3] = f.c3.ToString("F1");
-            DrawCells(rr, vals, sel ? cellSel : cell);
+            DrawCells(rr, vals, sel ? cellSel : cell, f.c1Text != null ? (sel ? cellTextSel : cellText) : null);
         }
         GUILayout.EndScrollView();
         if (e.type == EventType.Repaint) viewHeight = GUILayoutUtility.GetLastRect().height;
@@ -207,21 +219,35 @@ public class SalmonPanel : MonoBehaviour
         GUILayout.EndArea();
     }
 
-    /// 4 recuadros (2×2) con los promedios de la jaula; la polarización lleva una barra 0–1.
+    /// 6 recuadros (3×2) con los promedios de la jaula; polarización y rotación llevan barra 0–1.
     void DrawSummary(float areaW, float fs)
     {
-        float gap = fs * 0.4f;
-        float tw = (areaW - gap) * 0.5f, th = fs * 3.7f;
+        float gap = fs * 0.35f;
+        float tw = (areaW - 2f * gap) / 3f, th = fs * 4.1f;
         var r = GUILayoutUtility.GetRect(areaW, th * 2f + gap);
-        Tile(new Rect(r.x, r.y, tw, th), stats.count.ToString(), "peces");
-        Tile(new Rect(r.x + tw + gap, r.y, tw, th), stats.meanSpeed.ToString("F2") + " m/s", "velocidad media");
-        Tile(new Rect(r.x, r.y + th + gap, tw, th), stats.meanDepth.ToString("F1") + " m", "profundidad media");
-        var pr = new Rect(r.x + tw + gap, r.y + th + gap, tw, th);
-        Tile(pr, stats.polarization.ToString("F2"), "polarización (0–1)");
-        float bw = tw - fs * 1.2f;
-        var bar = new Rect(pr.x + fs * 0.6f, pr.yMax - fs * 0.5f, bw, fs * 0.25f);
+        Rect Cell(int col, int row) => new(r.x + col * (tw + gap), r.y + row * (th + gap), tw, th);
+
+        Tile(Cell(0, 0), stats.count.ToString(), "peces");
+        Tile(Cell(1, 0), stats.meanSpeed.ToString("F2") + " m/s", "velocidad media");
+        Tile(Cell(2, 0), stats.meanDepth.ToString("F1") + " m", "prof. media");
+        string nd = "n/d", why = stats.directionNote ?? "sin datos";
+        TileBar(Cell(0, 1), stats.directionValid ? stats.polarization.ToString("F2") : nd,
+                stats.directionValid ? "polarización" : why, stats.directionValid ? stats.polarization : -1f, fs);
+        TileBar(Cell(1, 1), stats.directionValid ? stats.rotation.ToString("F2") : nd,
+                stats.directionValid ? "orden de rotación" : why, stats.directionValid ? stats.rotation : -1f, fs);
+        bool hasConc = !float.IsNaN(stats.concentration);
+        Tile(Cell(2, 1), hasConc ? "×" + stats.concentration.ToString("F1") : nd,
+             hasConc ? "concentración" : "concentración");
+    }
+
+    void TileBar(Rect r, string value, string label, float bar01, float fs)
+    {
+        Tile(r, value, label);
+        if (bar01 < 0f) return;
+        float bw = r.width - fs * 1.0f;
+        var bar = new Rect(r.x + fs * 0.5f, r.yMax - fs * 0.5f, bw, fs * 0.25f);
         GUI.DrawTexture(bar, texBarBg);
-        GUI.DrawTexture(new Rect(bar.x, bar.y, bw * Mathf.Clamp01(stats.polarization), bar.height), texBar);
+        GUI.DrawTexture(new Rect(bar.x, bar.y, bw * Mathf.Clamp01(bar01), bar.height), texBar);
     }
 
     void Tile(Rect r, string value, string label)
@@ -229,16 +255,17 @@ public class SalmonPanel : MonoBehaviour
         GUI.Box(r, GUIContent.none, tile);
         float p = tileValue.fontSize * 0.45f;
         GUI.Label(new Rect(r.x + p, r.y + p * 0.6f, r.width - 2f * p, tileValue.fontSize * 1.5f), value, tileValue);
-        GUI.Label(new Rect(r.x + p, r.y + p * 0.6f + tileValue.fontSize * 1.45f, r.width - 2f * p, tileLabel.fontSize * 1.5f), label, tileLabel);
+        GUI.Label(new Rect(r.x + p, r.y + p * 0.6f + tileValue.fontSize * 1.4f, r.width - 2f * p, tileLabel.fontSize * 2.6f), label, tileLabel);
     }
 
-    static void DrawCells(Rect r, string[] texts, GUIStyle style)
+    /// col1Style: estilo alternativo para la columna 1 cuando es texto en vez de número.
+    static void DrawCells(Rect r, string[] texts, GUIStyle style, GUIStyle col1Style = null)
     {
         float x = r.x;
         for (int i = 0; i < texts.Length && i < ColW.Length; i++)
         {
             float cw = r.width * ColW[i];
-            GUI.Label(new Rect(x, r.y, cw, r.height), texts[i], style);
+            GUI.Label(new Rect(x, r.y, cw, r.height), texts[i], i == 1 && col1Style != null ? col1Style : style);
             x += cw;
         }
     }

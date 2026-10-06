@@ -5,7 +5,10 @@ using UnityEngine;
 
 /// <summary>
 /// Lee data/trajectories.csv (ver CLAUDE.md raíz) y anima un pez por cada id.
-/// Coloca este componente en un GameObject vacío y asigna un prefab de salmón.
+/// Las trayectorias se guardan en la escala estimada del video (videoWidth/Height/Depth):
+/// todas las métricas (velocidad, dirección, umbral de movimiento) se calculan ahí.
+/// cageWidth/Height/Depth solo define dónde se dibujan los peces dentro de la jaula
+/// virtual, así que agrandar el volumen de dibujo no infla las velocidades.
 /// </summary>
 public class TrajectoryPlayer : MonoBehaviour, IFishSource
 {
@@ -14,10 +17,15 @@ public class TrajectoryPlayer : MonoBehaviour, IFishSource
     public string csvFile = "trajectories.csv";
     public float fps = 25f;
 
-    [Header("Mapeo a la jaula virtual (metros)")]
-    public float cageWidth = 10f;   // ancho visible (cx 0..1)
-    public float cageHeight = 5f;   // alto visible (cy 0..1)
-    public float cageDepth = 10f;   // profundidad (z 0..1)
+    [Header("Escala real estimada del video (metros) — base de las métricas")]
+    public float videoWidth = 10f;   // ancho visible (cx 0..1)
+    public float videoHeight = 5f;   // alto visible (cy 0..1)
+    public float videoDepth = 10f;   // profundidad (z 0..1)
+
+    [Header("Volumen de dibujo en la jaula virtual (metros)")]
+    public float cageWidth = 10f;
+    public float cageHeight = 5f;
+    public float cageDepth = 10f;
 
     [Header("Peces")]
     public GameObject fishPrefab;
@@ -28,7 +36,7 @@ public class TrajectoryPlayer : MonoBehaviour, IFishSource
     [Header("Orientación")]
     [Tooltip("Dirección 'aguas arriba' en el espacio local de la jaula. Los peces casi quietos miran hacia aquí.")]
     public Vector3 upstreamDirection = Vector3.back; // (0,0,-1): hacia la cámara
-    [Tooltip("Velocidad (m/s) a partir de la cual el pez se orienta según su desplazamiento.")]
+    [Tooltip("Velocidad (m/s, escala del video) a partir de la cual el pez se orienta según su desplazamiento.")]
     public float moveSpeedThreshold = 0.6f;
     [Tooltip("Fracción del umbral bajo la cual vuelve a mirar aguas arriba (histéresis, evita parpadeo).")]
     [Range(0f, 1f)] public float releaseFraction = 0.7f;
@@ -43,10 +51,13 @@ public class TrajectoryPlayer : MonoBehaviour, IFishSource
     public int VisibleCount { get; private set; }
     public float Duration { get; private set; }
 
-    // id -> lista ordenada de (tiempo, posición)
+    // id -> lista ordenada de (tiempo, posición en metros del video)
     readonly Dictionary<int, List<(float t, Vector3 p)>> tracks = new();
     readonly Dictionary<int, Transform> fish = new();
     readonly HashSet<int> moving = new(); // peces que ahora siguen su dirección de movimiento
+
+    /// Factor por eje de la escala del video a la de dibujo.
+    Vector3 DrawScale => new(cageWidth / videoWidth, cageHeight / videoHeight, cageDepth / videoDepth);
 
     void Start()
     {
@@ -57,7 +68,7 @@ public class TrajectoryPlayer : MonoBehaviour, IFishSource
                                         : CreatePlaceholder();
             go.name = $"Salmon_{id}";
             go.transform.localScale *= fishScale;
-            go.transform.localPosition = tracks[id][0].p;
+            go.transform.localPosition = Vector3.Scale(tracks[id][0].p, DrawScale);
             go.transform.rotation = UpstreamRotation();
             // Collider simple para poder seleccionar el pez con un clic (raycast).
             if (go.GetComponent<Collider>() == null)
@@ -101,48 +112,68 @@ public class TrajectoryPlayer : MonoBehaviour, IFishSource
     static readonly string[] ColumnNames = { "ID", "Vel. aparente\n(m/s)", "Dist. a cámara\n(m)", "Altura\n(m)" };
     public string[] Columns => ColumnNames;
     public string Notes =>
-        "Vel. aparente: desplazamiento respecto a la cámara (promedio en ±0,5 s), no el " +
-        "esfuerzo de nado; ≈0 si el pez se mantiene quieto contra la corriente.\n" +
-        "Dist. a cámara: estimada por el tamaño aparente del pez (fija para cada pez).\n" +
-        "Altura: posición vertical en la imagen, medida desde el borde inferior.\n" +
+        "Métricas en la escala estimada del video (10×5×10 m); el dibujo se agranda para llenar la jaula.\n" +
+        $"Vel. aparente: desplazamiento respecto a la cámara (promedio en ±0,5 s), no el esfuerzo de " +
+        $"nado; bajo {moveSpeedThreshold:F1} m/s se muestra \"≈ 0 (en el lugar)\": el pez se mantiene " +
+        "contra la corriente del río.\n" +
+        "Polarización y rotación: con las velocidades del CSV (no con la orientación del pez dibujado); " +
+        "n/d si la mayoría está casi quieta.\n" +
+        "Dist. a cámara: estimada por el tamaño aparente del pez. Altura: desde el borde inferior de la imagen.\n" +
         "Clic en una fila o en un pez para resaltarlo; otro clic lo deselecciona.";
+    public string StatusLine => "Video de un río (Katmai): sin perfil térmico; los selectores solo cambian la luz.";
 
-    /// Filas: velocidad aparente (m/s), distancia a la cámara (m, de z), altura en la imagen (m, de cy).
+    /// Filas (escala del video): velocidad aparente, distancia a la cámara (de z), altura en la imagen (de cy).
     public void GetRows(List<FishRow> into)
     {
         into.Clear();
         foreach (int id in fishIds)
         {
-            if (!IsVisible(id)) continue;
-            var p = fish[id].localPosition;
+            if (!IsVisible(id) || !Sample(tracks[id], CurrentTime, out var p)) continue;
+            float v = Velocity(tracks[id], CurrentTime).magnitude;
             into.Add(new FishRow
             {
                 id = id,
-                c1 = Velocity(tracks[id], CurrentTime).magnitude,
+                c1 = v,
+                c1Text = v < moveSpeedThreshold ? "≈ 0 (en el lugar)" : null,
                 c2 = p.z,
-                c3 = p.y + cageHeight * 0.5f,
+                c3 = p.y + videoHeight * 0.5f,
             });
         }
     }
 
-    /// Resumen de los peces visibles. La profundidad sale de la altura en la imagen
-    /// mapeada a la jaula, y la polarización de la velocidad aparente.
+    readonly List<Vector3> statPos = new(), statVel = new();
+    readonly List<float> statDepth = new();
+
+    /// Resumen de los peces visibles. Velocidades y direcciones salen del CSV (escala del video);
+    /// la profundidad, de la posición dibujada en la jaula. Si la mayoría está bajo
+    /// moveSpeedThreshold, polarización y rotación quedan como n/d.
     public SchoolStats GetStats()
     {
-        var st = new SchoolStats();
-        Vector3 dirSum = Vector3.zero;
+        var st = new SchoolStats { concentration = float.NaN };
+        statPos.Clear(); statVel.Clear(); statDepth.Clear();
         int nMoving = 0;
         foreach (int id in fishIds)
         {
-            if (!IsVisible(id)) continue;
+            if (!IsVisible(id) || !Sample(tracks[id], CurrentTime, out var p)) continue;
             var v = Velocity(tracks[id], CurrentTime);
             st.count++;
             st.meanSpeed += v.magnitude;
             st.meanDepth += -fish[id].position.y;
-            if (v.sqrMagnitude > 0.0025f) { dirSum += v.normalized; nMoving++; }
+            statDepth.Add(-fish[id].position.y);
+            if (v.magnitude < moveSpeedThreshold) continue;
+            nMoving++;
+            // Posición horizontal respecto al centro del volumen (x centrado, z de 0 a videoDepth).
+            statPos.Add(new Vector3(p.x, 0f, p.z - videoDepth * 0.5f));
+            statVel.Add(v);
         }
-        if (st.count > 0) { st.meanSpeed /= st.count; st.meanDepth /= st.count; }
-        st.polarization = nMoving > 0 ? dirSum.magnitude / nMoving : 0f;
+        if (st.count == 0) return st;
+        st.meanSpeed /= st.count;
+        st.meanDepth /= st.count;
+        st.directionValid = nMoving * 2 > st.count;
+        if (st.directionValid)
+            FishMetrics.Direction(statPos, statVel, statPos.Count, out st.polarization, out st.rotation);
+        else
+            st.directionNote = "peces casi quietos";
         return st;
     }
 
@@ -176,9 +207,9 @@ public class TrajectoryPlayer : MonoBehaviour, IFishSource
             float cy = float.Parse(c[4], ci);
             float z = float.Parse(c[8], ci);
 
-            var pos = new Vector3((cx - 0.5f) * cageWidth,
-                                  (0.5f - cy) * cageHeight,
-                                  z * cageDepth);
+            var pos = new Vector3((cx - 0.5f) * videoWidth,
+                                  (0.5f - cy) * videoHeight,
+                                  z * videoDepth);
             if (!tracks.TryGetValue(id, out var list))
                 tracks[id] = list = new List<(float, Vector3)>();
             list.Add((t, pos));
@@ -192,6 +223,7 @@ public class TrajectoryPlayer : MonoBehaviour, IFishSource
         if (Duration <= 0) return;
         if (playing) CurrentTime = (CurrentTime + Time.deltaTime * speed) % Duration;
 
+        var scale = DrawScale;
         int visible = 0;
         foreach (var kv in tracks)
         {
@@ -204,7 +236,7 @@ public class TrajectoryPlayer : MonoBehaviour, IFishSource
             tr.gameObject.SetActive(true);
             visible++;
 
-            tr.localPosition = pos;
+            tr.localPosition = Vector3.Scale(pos, scale);
 
             // Velocidad suavizada en una ventana centrada: el desplazamiento
             // frame a frame es casi todo ruido del tracker.
@@ -216,7 +248,7 @@ public class TrajectoryPlayer : MonoBehaviour, IFishSource
             if (isMoving) moving.Add(kv.Key); else moving.Remove(kv.Key);
 
             var target = isMoving
-                ? Quaternion.LookRotation(transform.TransformDirection(vel))
+                ? Quaternion.LookRotation(transform.TransformDirection(Vector3.Scale(vel, scale)))
                 : UpstreamRotation();
             float k = 1f - Mathf.Exp(-turnSpeed * Time.deltaTime); // independiente del framerate
             tr.rotation = Quaternion.Slerp(tr.rotation, target, k);
@@ -230,7 +262,7 @@ public class TrajectoryPlayer : MonoBehaviour, IFishSource
         return Quaternion.LookRotation(transform.TransformDirection(dir));
     }
 
-    /// Velocidad (m/s, espacio local) por diferencia centrada en [t-w, t+w],
+    /// Velocidad (m/s, escala del video) por diferencia centrada en [t-w, t+w],
     /// recortada a los tramos donde el pez está en cuadro.
     Vector3 Velocity(List<(float t, Vector3 p)> l, float t)
     {

@@ -17,6 +17,13 @@ public class FarmCage : MonoBehaviour
     public TrajectoryPlayer player;
     public FishSchool school;
 
+    [Header("Variación propia (jaulas simuladas)")]
+    public float countFactor = 1f;
+    public float lengthFactor = 1f;
+    public float speedFactor = 1f;
+    [Tooltip("m (+ = más hondo)")] public float depthOffset;
+    public float circlingFactor = 1f;
+
     /// Peces de la jaula para el panel (datos reales o simulación), o null si está vacía.
     public IFishSource Source => player != null ? player : school != null ? (IFishSource)school : null;
 

@@ -6,6 +6,8 @@ public struct FishRow
 {
     public int id;
     public float c1, c2, c3;
+    /// Si no es null, se muestra en lugar del número de la columna 1 (p. ej. "≈ 0 (en el lugar)").
+    public string c1Text;
 }
 
 /// <summary>Resumen de una jaula para el panel.</summary>
@@ -16,6 +18,16 @@ public struct SchoolStats
     public float meanDepth;     // m bajo la superficie
     /// 0 = direcciones desordenadas, 1 = todos nadan hacia el mismo lado (|promedio de direcciones|).
     public float polarization;
+    /// 0 = sin giro común, 1 = todos giran en el mismo sentido alrededor del eje de la jaula
+    /// (|promedio de la componente tangencial de la dirección|).
+    public float rotation;
+    /// false si no hay suficientes peces en movimiento para hablar de dirección (polarización y rotación = n/d).
+    public bool directionValid;
+    /// Por qué la dirección no es válida (se muestra en el panel).
+    public string directionNote;
+    /// Densidad en la franja de ±1 m alrededor de la profundidad mediana, relativa a la densidad
+    /// media en toda la profundidad de la red (1 = repartidos; 4 = muy concentrados). NaN si no aplica.
+    public float concentration;
 }
 
 /// <summary>
@@ -31,10 +43,55 @@ public interface IFishSource
     /// Llena `into` con los peces visibles, ordenados por ID.
     void GetRows(List<FishRow> into);
     SchoolStats GetStats();
+    /// Línea extra bajo el resumen (temperatura, alimentación...), o null.
+    string StatusLine { get; }
     /// Pez bajo el rayo (clic en 3D), o false.
     bool TryPick(Ray ray, out int id);
     /// Resalta `id` (o ninguno con -1) y atenúa al resto. Se llama en cada frame; debe ser barato.
     void SetSelection(int id, Color highlight, float emission, float dimFactor);
+}
+
+/// <summary>Métricas de dirección compartidas por las fuentes de peces.</summary>
+public static class FishMetrics
+{
+    /// Polarización y orden de rotación a partir de posiciones horizontales relativas al eje
+    /// de la jaula (x,z) y velocidades. Solo cuentan los vectores no nulos.
+    public static void Direction(IReadOnlyList<Vector3> pos, IReadOnlyList<Vector3> vel, int n,
+                                 out float polarization, out float rotation)
+    {
+        Vector3 dirSum = Vector3.zero;
+        float rotSum = 0f;
+        int nd = 0, nr = 0;
+        for (int i = 0; i < n; i++)
+        {
+            float s = vel[i].magnitude;
+            if (s < 1e-4f) continue;
+            var d = vel[i] / s;
+            dirSum += d;
+            nd++;
+            var r = new Vector2(pos[i].x, pos[i].z);
+            if (r.sqrMagnitude < 0.09f) continue; // en el eje no hay sentido de giro
+            r.Normalize();
+            rotSum += r.x * d.z - r.y * d.x; // (r̂ × v̂)·ŷ con signo: +1 antihorario visto desde arriba
+            nr++;
+        }
+        polarization = nd > 0 ? dirSum.magnitude / nd : 0f;
+        rotation = nr > 0 ? Mathf.Abs(rotSum) / nr : 0f;
+    }
+
+    /// Concentración vertical: fracción de peces a ±1 m de la profundidad mediana,
+    /// dividida por la fracción que habría con densidad uniforme en toda la red.
+    public static float VerticalConcentration(List<float> depths, float netDepth)
+    {
+        int n = depths.Count;
+        if (n == 0 || netDepth <= 2f) return float.NaN;
+        depths.Sort();
+        float median = depths[n / 2];
+        int inBand = 0;
+        foreach (float d in depths) if (Mathf.Abs(d - median) <= 1f) inBand++;
+        float lo = Mathf.Max(0f, median - 1f), hi = Mathf.Min(netDepth, median + 1f);
+        return (inBand / (float)n) / ((hi - lo) / netDepth);
+    }
 }
 
 /// <summary>

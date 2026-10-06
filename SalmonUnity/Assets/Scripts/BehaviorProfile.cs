@@ -23,6 +23,8 @@ public class BehaviorProfile
     [Range(0f, 0.5f)] public float speedVariation = 0.15f;
     [Tooltip("Aceleración máxima (m/s²): qué tan bruscos son los giros")]
     [Range(0.1f, 5f)] public float maxAccel = 1.2f;
+    [Tooltip("Deambular: aceleración aleatoria por pez (m/s²); más alto = cardumen menos ordenado")]
+    [Range(0f, 2f)] public float wander = 0.05f;
 
     [Header("Vecinos (boids)")]
     [Range(0.3f, 4f)] public float neighborRadius = 1.6f;
@@ -47,6 +49,12 @@ public class BehaviorProfile
     [Tooltip("Radio del anillo como fracción del semilado de la jaula")]
     [Range(0f, 1f)] public float ringRadius = 0.55f;
 
+    [Header("Alimentación")]
+    [Tooltip("Pellets por segundo que lanza el alimentador (0 = sin alimentación)")]
+    [Range(0f, 20f)] public float feedRate = 0f;
+    [Tooltip("Atracción hacia el alimento; también es la fracción de peces con apetito (0–1)")]
+    [Range(0f, 1f)] public float appetite = 0f;
+
     public BehaviorProfile Clone() => (BehaviorProfile)MemberwiseClone();
 
     /// Interpolación lineal campo a campo (t se limita a 0..1).
@@ -60,6 +68,7 @@ public class BehaviorProfile
             meanSpeed = Mathf.Lerp(a.meanSpeed, b.meanSpeed, t),
             speedVariation = Mathf.Lerp(a.speedVariation, b.speedVariation, t),
             maxAccel = Mathf.Lerp(a.maxAccel, b.maxAccel, t),
+            wander = Mathf.Lerp(a.wander, b.wander, t),
             neighborRadius = Mathf.Lerp(a.neighborRadius, b.neighborRadius, t),
             separationRadius = Mathf.Lerp(a.separationRadius, b.separationRadius, t),
             separationWeight = Mathf.Lerp(a.separationWeight, b.separationWeight, t),
@@ -72,6 +81,8 @@ public class BehaviorProfile
             depthWeight = Mathf.Lerp(a.depthWeight, b.depthWeight, t),
             circlingWeight = Mathf.Lerp(a.circlingWeight, b.circlingWeight, t),
             ringRadius = Mathf.Lerp(a.ringRadius, b.ringRadius, t),
+            feedRate = Mathf.Lerp(a.feedRate, b.feedRate, t),
+            appetite = Mathf.Lerp(a.appetite, b.appetite, t),
         };
     }
 }

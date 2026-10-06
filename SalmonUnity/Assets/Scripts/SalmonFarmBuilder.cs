@@ -93,8 +93,16 @@ public class SalmonFarmBuilder : MonoBehaviour
         SetupCamera();
         foreach (var l in FindObjectsByType<Light>(FindObjectsSortMode.None))
             if (l.type == LightType.Directional) { sun = l; break; }
-        Underwater = true; // fuerza a aplicar el ambiente de superficie
-        SetUnderwater(false);
+
+        // Condiciones (etapa, estación, hora): perfiles iniciales al instante, antes del Start de los cardúmenes.
+        var cond = GetComponent<FarmConditions>();
+        if (cond == null) cond = gameObject.AddComponent<FarmConditions>();
+        cond.farm = this;
+        cond.nav = GetComponent<FarmNavigator>();
+        cond.nav.conditions = cond;
+        cond.Apply(immediate: true);
+        ApplyNetLook();
+        ApplyEnvironment();
     }
 
     Transform Child(string name)
@@ -106,59 +114,125 @@ public class SalmonFarmBuilder : MonoBehaviour
 
     // ------------------------------------------------------------------ Ambiente
 
-    void Update()
+    /// Iluminación de un momento del día, en superficie o bajo el agua.
+    struct Lighting
     {
-        if (!Underwater || murk <= 0f) return;
-        // Al sumergirse el agua se ve turbia y se aclara en ~0,8 s.
-        murk = Mathf.Max(0f, murk - Time.deltaTime / 0.8f);
-        RenderSettings.fogDensity = Mathf.Lerp(0.035f, 0.16f, murk * murk);
+        public Color fog, ambient, light, waterDeep, waterSky;
+        public float lightIntensity, fogDensity, fogEnd;
+        public Vector3 lightEuler;
+
+        public static Lighting Lerp(Lighting a, Lighting b, float t) => new()
+        {
+            fog = Color.Lerp(a.fog, b.fog, t), ambient = Color.Lerp(a.ambient, b.ambient, t),
+            light = Color.Lerp(a.light, b.light, t), waterDeep = Color.Lerp(a.waterDeep, b.waterDeep, t),
+            waterSky = Color.Lerp(a.waterSky, b.waterSky, t),
+            lightIntensity = Mathf.Lerp(a.lightIntensity, b.lightIntensity, t),
+            fogDensity = Mathf.Lerp(a.fogDensity, b.fogDensity, t), fogEnd = Mathf.Lerp(a.fogEnd, b.fogEnd, t),
+            lightEuler = Vector3.Lerp(a.lightEuler, b.lightEuler, t),
+        };
     }
 
-    /// Cambia entre el ambiente de superficie (niebla de distancia, sol) y el
+    // Superficie: sol de tarde / luna. Bajo el agua: luz filtrada azul-verdosa / casi oscuro.
+    static readonly Lighting SurfaceDay = new()
+    {
+        fog = SkyColor, ambient = new Color(0.56f, 0.62f, 0.68f), light = new Color(1f, 0.95f, 0.86f),
+        lightIntensity = 1.25f, lightEuler = new Vector3(38f, -35f, 0f), fogEnd = 1100f,
+        waterDeep = new Color(0.04f, 0.20f, 0.24f), waterSky = new Color(0.62f, 0.74f, 0.82f),
+    };
+    static readonly Lighting SurfaceNight = new()
+    {
+        fog = new Color(0.06f, 0.09f, 0.16f), ambient = new Color(0.12f, 0.15f, 0.24f), light = new Color(0.60f, 0.70f, 1f),
+        lightIntensity = 0.3f, lightEuler = new Vector3(32f, 140f, 0f), fogEnd = 750f,
+        waterDeep = new Color(0.01f, 0.04f, 0.07f), waterSky = new Color(0.10f, 0.14f, 0.24f),
+    };
+    static readonly Lighting UnderDay = new()
+    {
+        fog = WaterColor, ambient = new Color(0.30f, 0.50f, 0.60f), light = new Color(0.75f, 0.92f, 1f),
+        lightIntensity = 1.3f, lightEuler = new Vector3(70f, 20f, 0f), fogDensity = 0.035f,
+    };
+    static readonly Lighting UnderNight = new()
+    {
+        fog = new Color(0.01f, 0.05f, 0.09f), ambient = new Color(0.11f, 0.18f, 0.26f), light = new Color(0.55f, 0.68f, 1f),
+        lightIntensity = 0.35f, lightEuler = new Vector3(70f, 140f, 0f), fogDensity = 0.05f,
+    };
+
+    /// 0 = día, 1 = noche (se interpola en SetNight).
+    public float Night { get; private set; }
+    float nightTarget, nightSpeed;
+    Material waterMat;
+
+    /// Pasa a día o noche en `seconds` (0 = al instante).
+    public void SetNight(bool night, float seconds)
+    {
+        nightTarget = night ? 1f : 0f;
+        nightSpeed = seconds > 0f ? 1f / seconds : float.PositiveInfinity;
+        if (seconds <= 0f) Night = nightTarget;
+    }
+
+    void Update()
+    {
+        Night = Mathf.MoveTowards(Night, nightTarget, nightSpeed * Time.deltaTime);
+        // Al sumergirse el agua se ve turbia y se aclara en ~0,8 s.
+        if (murk > 0f) murk = Mathf.Max(0f, murk - Time.deltaTime / 0.8f);
+        ApplyEnvironment();
+    }
+
+    /// Cambia entre el ambiente de superficie (niebla de distancia, sol/luna) y el
     /// submarino (niebla azul-verdosa densa). murky: empieza turbia y se aclara.
     public void SetUnderwater(bool on, bool murky = false)
     {
         if (on == Underwater) return;
         Underwater = on;
-        var cam = Camera.main;
-        if (on)
+        murk = on && murky ? 1f : 0f;
+        ApplyNetLook();
+        ApplyEnvironment();
+    }
+
+    /// Desde la superficie la red se desvanece con la profundidad; dentro del agua se ve entera y tenue.
+    void ApplyNetLook()
+    {
+        Mats.Net.SetFloat("_DepthFade", Underwater ? 0f : 0.28f);
+        Mats.NetFill.SetFloat("_DepthFade", Underwater ? 0f : 0.28f);
+        Mats.Net.SetColor("_BaseColor", Underwater ? NetUnderwater : NetSurface);
+    }
+
+    void ApplyEnvironment()
+    {
+        float t = Mathf.SmoothStep(0f, 1f, Night);
+        var L = Underwater ? Lighting.Lerp(UnderDay, UnderNight, t) : Lighting.Lerp(SurfaceDay, SurfaceNight, t);
+        RenderSettings.fog = true;
+        RenderSettings.ambientMode = AmbientMode.Flat;
+        RenderSettings.ambientLight = L.ambient;
+        RenderSettings.fogColor = L.fog;
+        if (Underwater)
         {
             RenderSettings.fogMode = FogMode.Exponential;
-            RenderSettings.fogColor = WaterColor;
-            murk = murky ? 1f : 0f;
-            RenderSettings.fogDensity = murky ? 0.16f : 0.035f;
-            RenderSettings.ambientLight = new Color(0.30f, 0.50f, 0.60f);
-            if (sun != null)
-            {
-                sun.color = new Color(0.75f, 0.92f, 1f);
-                sun.intensity = 1.3f;
-                sun.transform.rotation = Quaternion.Euler(70f, 20f, 0f);
-            }
-            if (cam != null) cam.backgroundColor = WaterColor;
-            Mats.Net.SetFloat("_DepthFade", 0f);
-            Mats.NetFill.SetFloat("_DepthFade", 0f);
-            Mats.Net.SetColor("_BaseColor", NetUnderwater);
+            RenderSettings.fogDensity = Mathf.Lerp(L.fogDensity, 0.16f, murk * murk);
         }
         else
         {
             RenderSettings.fogMode = FogMode.Linear;
-            RenderSettings.fogColor = SkyColor;
             RenderSettings.fogStartDistance = 150f;
-            RenderSettings.fogEndDistance = 1100f;
-            RenderSettings.ambientLight = new Color(0.56f, 0.62f, 0.68f);
-            if (sun != null)
+            RenderSettings.fogEndDistance = L.fogEnd;
+            if (waterMat == null)
             {
-                sun.color = new Color(1f, 0.95f, 0.86f);
-                sun.intensity = 1.25f;
-                sun.transform.rotation = Quaternion.Euler(38f, -35f, 0f);
+                var w = transform.Find("Entorno/Agua");
+                if (w != null) waterMat = w.GetComponent<MeshRenderer>().sharedMaterial;
             }
-            if (cam != null) cam.backgroundColor = SkyColor;
-            Mats.Net.SetFloat("_DepthFade", 0.28f);
-            Mats.NetFill.SetFloat("_DepthFade", 0.28f);
-            Mats.Net.SetColor("_BaseColor", NetSurface);
+            if (waterMat != null)
+            {
+                waterMat.SetColor("_DeepColor", L.waterDeep);
+                waterMat.SetColor("_SkyColor", L.waterSky);
+            }
         }
-        RenderSettings.fog = true;
-        RenderSettings.ambientMode = AmbientMode.Flat;
+        if (sun != null)
+        {
+            sun.color = L.light;
+            sun.intensity = L.lightIntensity;
+            sun.transform.rotation = Quaternion.Euler(L.lightEuler);
+        }
+        var cam = Camera.main;
+        if (cam != null) cam.backgroundColor = L.fog;
     }
 
     /// Deja visible solo `focus` (o todo, si es null).
@@ -209,8 +283,9 @@ public class SalmonFarmBuilder : MonoBehaviour
         hud.enabled = false;
     }
 
-    /// Jaulas simuladas: un cardumen boids con el perfil base, variado por jaula
-    /// (cantidad, velocidad, profundidad, giro) para que no se vean todas iguales.
+    /// Jaulas simuladas: un cardumen boids. Cada jaula guarda una variación propia
+    /// (cantidad, tamaño, velocidad, profundidad, giro) que FarmConditions aplica sobre el
+    /// perfil de la etapa/estación/hora, para que no se vean todas iguales.
     void AttachSchool(FarmCage cage, System.Random rnd)
     {
         float R(float a, float b) => Rand(rnd, a, b);
@@ -221,17 +296,14 @@ public class SalmonFarmBuilder : MonoBehaviour
         school.netDepth = netDepth;
         school.seed = seed * 100 + cage.index;
         school.clockwise = cage.index % 2 == 0;
-        var p = simulatedProfile.Clone();
-        p.fishCount = Mathf.Round(R(150f, 300f));
-        p.meanSpeed *= R(0.85f, 1.15f);
-        p.fishLength *= R(0.9f, 1.1f);
-        p.preferredDepth = Mathf.Clamp(p.preferredDepth + R(-1f, 1f), 1.5f, netDepth - 1.5f);
-        p.circlingWeight *= R(0.8f, 1.25f);
-        school.profile = p;
+        cage.countFactor = R(0.75f, 1.25f);
+        cage.lengthFactor = R(0.92f, 1.08f);
+        cage.speedFactor = R(0.88f, 1.12f);
+        cage.depthOffset = R(-0.6f, 0.6f);
+        cage.circlingFactor = R(0.8f, 1.25f);
         cage.school = school;
         cage.isRealData = false;
         cage.dataLabel = "Simulación · basada en supuestos";
-        cage.description = $"Cardumen boids de {p.fishCount:F0} peces que gira en anillo";
     }
 
     // ------------------------------------------------------------------ Grilla

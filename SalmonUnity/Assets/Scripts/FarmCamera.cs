@@ -31,7 +31,7 @@ public class FarmCamera : MonoBehaviour
     public float minCagePitch = -35f;
     public float cageAutoSpeed = 4f;
     [Tooltip("Altura máxima (m) de la cámara en la jaula: siempre bajo la superficie")]
-    public float maxCageCameraY = -0.8f;
+    public float maxCageCameraY = -0.5f;
 
     [Header("Transición")]
     public float flightDuration = 1.5f;
@@ -106,13 +106,16 @@ public class FarmCamera : MonoBehaviour
 
     /// Vuela desde la vista general hasta quedar bajo el agua frente a `focus`.
     /// onSurface(true/false) se llama al cruzar la superficie hacia abajo/arriba.
-    public void FlyToCage(Vector3 focus, Action<bool> onSurface, Action onArrive)
+    /// yaw/pitch/dist opcionales: por defecto de frente a la red (yaw 0, mirando hacia +Z como
+    /// la cámara del video). Un pitch alto se limita para no salir del agua.
+    public void FlyToCage(Vector3 focus, Action<bool> onSurface, Action onArrive,
+                          float yaw = 0f, float? pitch = null, float? dist = null)
     {
         if (CurrentMode != Mode.Overview) return;
         cageTarget = focus;
-        cageYaw = 0f; // de frente a la red, mirando hacia +Z como la cámara del video
-        cagePitchNow = cagePitch;
-        cageDist = cageDistance;
+        cageYaw = yaw;
+        cagePitchNow = pitch ?? cagePitch;
+        cageDist = dist ?? cageDistance;
         StartCoroutine(Fly(true, onSurface, onArrive));
     }
 

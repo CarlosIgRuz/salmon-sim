@@ -56,15 +56,22 @@ unity command --tag editor   # filtrar por categoría
 ### `TrajectoryPlayer.cs`
 Componente central. Lee `StreamingAssets/trajectories.csv` y crea un GameObject por cada `id` de pez encontrado en el CSV. En cada `Update()` interpola la posición del pez en el tiempo actual y lo mueve suavemente. Si hay un hueco > 1 s entre dos filas consecutivas del mismo pez, lo oculta (oclusión simulada). Expone `CurrentTime`, `VisibleCount` y `Duration` para el HUD.
 
-**Inspector:** `csvFile`, `fps`, `cageWidth/Height/Depth` (metros de la jaula virtual; `SalmonFarmBuilder` los sobrescribe para llenar la red menos `dataMargin`), `fishPrefab` (si es null usa `FishFactory`), `fishScale`, `turnSpeed`, `playing`, `speed`. Implementa `IFishSource` para el panel.
+Las trayectorias se guardan en la escala estimada del video (`videoWidth/Height/Depth`, 10×5×10 m) y **todas las métricas se calculan ahí** (velocidad, umbral `moveSpeedThreshold`, polarización y rotación con las velocidades del CSV, nunca con la orientación dibujada). `cageWidth/Height/Depth` solo es el volumen de dibujo. Bajo el umbral la velocidad se muestra "≈ 0 (en el lugar)"; si la mayoría está bajo el umbral, polarización y rotación son n/d.
+
+**Inspector:** `csvFile`, `fps`, `videoWidth/Height/Depth`, `cageWidth/Height/Depth` (dibujo; `SalmonFarmBuilder` los sobrescribe para llenar la red menos `dataMargin`), `fishPrefab` (si es null usa `FishFactory`), `fishScale`, `turnSpeed`, `playing`, `speed`. Implementa `IFishSource` para el panel.
 
 ### `FishSchool.cs` + `BehaviorProfile.cs`
 Cardumen simulado (boids) en coordenadas locales de la jaula (superficie y=0, red |x|,|z| ≤ `halfSize`, fondo −`netDepth`). Reglas: separación, alineación, cohesión, evitar la red (empuje suave + límite duro `hardMargin`: nunca la cruzan), profundidad preferida y giro en anillo (`clockwise`). Vecinos con grilla espacial (counting sort). Se dibuja con `Graphics.RenderMeshInstanced` (malla `FishFactory.SharedMesh()` + shader `SalmonSim/FishInstanced`, que hace el aleteo); sin GameObjects ni colliders por pez (el clic usa un test rayo-esfera).
 - `profile` (`BehaviorProfile`, serializable): nº de peces, largo, velocidad media y variación, aceleración máxima, radios y pesos de cada regla, profundidad preferida y dispersión, peso y radio del anillo. Todo continuo: `BehaviorProfile.Lerp` y `FishSchool.BlendTo(perfil, segundos)` cambian de perfil suavemente. `BehaviorProfileAsset` (ScriptableObject) sirve para guardar presets.
+- Alimentación: `feedRate` (pellets/s) y `appetite` (fracción de peces que persigue un pellet); los pellets caen a `pelletSinkSpeed` (0,1 m/s, supuesto sin fuente) y solo existen en la jaula abierta. `wander` agrega deambular aleatorio (cardumen menos ordenado de noche).
 - `fullQuality`: solo la jaula abierta simula todos los peces; en la vista general cada jaula simula `liteFishCount` (40).
 
+### `FarmConditions.cs`
+Etapa (Smolt / Engorda / Precosecha), estación (Verano / Invierno) y hora (Día / Noche). `BuildProfile(cage)` traduce la combinación a un `BehaviorProfile` (tamaño por peso, velocidad en BL/s limitada a 0,4–1,0, nº de peces de muestra, profundidad por termorregulación + desplazamiento día/noche según estación, estructura del cardumen, alimentación) y `Apply` lo aplica con `FishSchool.BlendTo` (`blendSeconds` = 3 s) y cambia la luz (`SalmonFarmBuilder.SetNight`; la Jaula 1 solo cambia la luz). Dibuja la barra superior de selectores (`FarmUi.TopInset` reserva su altura), la ventana "ⓘ Supuestos" (`Assumptions()` se arma con las mismas constantes del modelo; lo que no tiene referencia se marca "supuesto sin fuente") y el widget de perfil térmico.
+**Pruebas por código:** `FindFirstObjectByType<FarmConditions>().Set(Stage.X, Season.Y, TimeOfDay.Z)`; esperar ~10–15 s a que el cardumen cambie de capa (la velocidad vertical está limitada).
+
 ### `IFishSource.cs`
-Contrato entre el panel y una jaula (`Columns`, `Notes`, `GetRows`, `GetStats`, `TryPick`, `SetSelection`), más `RendererHighlighter` (resaltado de peces hechos de Renderers).
+Contrato entre el panel y una jaula (`Columns`, `Notes`, `StatusLine`, `GetRows`, `GetStats`, `TryPick`, `SetSelection`). `SchoolStats` incluye polarización, orden de rotación (0–1, |promedio de la componente tangencial de la dirección|), validez de la dirección y concentración vertical (densidad a ±1 m de la mediana / densidad media). `FishMetrics` calcula esas métricas; `RendererHighlighter` resalta peces hechos de Renderers.
 
 ### `SalmonFarmBuilder.cs`
 Componente que arma toda la escena al dar Play. Si no está en la escena, un `[RuntimeInitializeOnLoadMethod]` lo crea con valores por defecto (para cambiarlos, agrégalo a un objeto de la escena).
@@ -99,7 +106,7 @@ Navegación vista general ↔ jaula. En la vista general: etiqueta con el nombre
 **Pruebas por código:** `EnterCage(i)`, `ExitCage()`, `forcedHover = i` (hover sin mouse). Para capturar a mitad del vuelo, subir `FarmCamera.flightDuration` y congelar con `Time.timeScale = 0` (las llamadas `eval` tardan más que 1,5 s).
 
 ### `SalmonPanel.cs`
-Panel derecho de la jaula abierta (cualquier `IFishSource`, asignado en `Source`): resumen (nº de peces, velocidad media, profundidad media, polarización 0–1), tabla con scroll (solo dibuja las filas visibles) y selección (clic en una fila o en un pez, sin arrastrar). `PanelRect` permite a la cámara ignorar clics sobre el panel.
+Panel derecho de la jaula abierta (cualquier `IFishSource`, asignado en `Source`): resumen en 6 recuadros (peces, velocidad media, profundidad media, polarización, orden de rotación, concentración) + línea de estado (temperatura, alimentación), tabla con scroll (solo dibuja las filas visibles) y selección (clic en una fila o en un pez, sin arrastrar). `PanelRect` permite a la cámara ignorar clics sobre el panel.
 
 ### `SalmonHud.cs`
 HUD IMGUI (sin Canvas). Muestra en la esquina superior izquierda:
