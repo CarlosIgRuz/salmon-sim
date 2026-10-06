@@ -82,10 +82,14 @@ Shaders URP propios (en `Resources` para que entren en un build): agua con ondas
 Anima la cola del salmón. En cada `Update()` aplica una rotación senoidal al `TailPivot` con frecuencia (~6.5 Hz) y amplitud (~28°) aleatorias por pez.
 
 ### `FarmCamera.cs`
-Cámara de la vista general: órbita lenta automática; arrastrar con el mouse rota, la rueda hace zoom. El input se lee con IMGUI (`Event.current`) porque el proyecto usa solo el Input System nuevo.
+Cámara con tres modos: `Overview` (órbita lenta sobre la salmonera), `Transition` y `Cage` (órbita bajo el agua frente a la red, sin salir de la superficie). En ambos modos estables: arrastrar rota, la rueda hace zoom. `FlyToCage` / `FlyToOverview` vuelan ~1,5 s (`flightDuration`) por una curva con easing que termina en picado bajo el agua; avisan al cruzar la superficie. El input se lee con IMGUI (`Event.current`) porque el proyecto usa solo el Input System nuevo.
 
 ### `FarmNavigator.cs`
-Interfaz de la vista general: nombre de cada jaula sobre ella y ayuda de controles.
+Navegación vista general ↔ jaula. En la vista general: etiqueta con el nombre de cada jaula, hover (raycast al collider) que la resalta y muestra un tooltip, clic para entrar. En la jaula: título, botón "← Volver" y tecla Esc; muestra `SalmonHud`/`SalmonPanel` solo si la jaula tiene `player`. Al cruzar la superficie llama a `SetUnderwater` e `Isolate`.
+**Pruebas por código:** `EnterCage(i)`, `ExitCage()`, `forcedHover = i` (hover sin mouse). Para capturar a mitad del vuelo, subir `FarmCamera.flightDuration` y congelar con `Time.timeScale = 0` (las llamadas `eval` tardan más que 1,5 s).
+
+### `SalmonPanel.cs`
+Panel derecho con la tabla de salmones visibles y selección (clic en una fila o en un pez, sin arrastrar). `PanelRect` permite a la cámara ignorar clics sobre el panel.
 
 ### `SalmonHud.cs`
 HUD IMGUI (sin Canvas). Muestra en la esquina superior izquierda:

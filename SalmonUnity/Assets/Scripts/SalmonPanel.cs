@@ -32,6 +32,11 @@ public class SalmonPanel : MonoBehaviour
     Vector2 scroll;
     bool scrollToSelected;
     Rect panelRect;
+    Vector2? pressPos;
+    const float ClickTolerance = 6f;
+
+    /// Rectángulo del panel en coordenadas GUI (para que otros scripts ignoren clics sobre él).
+    public Rect PanelRect => enabled ? panelRect : Rect.zero;
 
     void Update()
     {
@@ -175,10 +180,15 @@ public class SalmonPanel : MonoBehaviour
         float w = Mathf.Clamp(Screen.width * 0.30f, 280f, 560f);
         panelRect = new Rect(Screen.width - w - pad, pad, w, Screen.height - 2f * pad);
 
-        // Clic fuera del panel: intentar seleccionar un pez en la vista 3D.
+        // Clic fuera del panel (sin arrastrar, que rota la cámara): seleccionar un pez en 3D.
         var e = Event.current;
-        if (e.type == EventType.MouseDown && e.button == 0 && !panelRect.Contains(e.mousePosition))
-            TryPick(e.mousePosition);
+        if (e.type == EventType.MouseDown && e.button == 0)
+            pressPos = panelRect.Contains(e.mousePosition) ? null : e.mousePosition;
+        else if (e.type == EventType.MouseUp && e.button == 0 && pressPos.HasValue)
+        {
+            if ((e.mousePosition - pressPos.Value).magnitude <= ClickTolerance) TryPick(e.mousePosition);
+            pressPos = null;
+        }
 
         GUI.Box(panelRect, GUIContent.none, panelBg);
         float inner = pad * 0.6f;
