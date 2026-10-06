@@ -1,6 +1,7 @@
 # SalmonUnity — Guía para Claude Code
 
-Proyecto Unity que lee `data/trajectories.csv` y anima salmones 3D en una jaula virtual cilíndrica.
+Proyecto Unity que arma una salmonera completa (lago, montañas, grilla de jaulas, pontón) y,
+en la "Jaula 1", anima salmones 3D a partir de `data/trajectories.csv`.
 
 ## Comandos esenciales con `unity command`
 
@@ -56,20 +57,35 @@ Componente central. Lee `StreamingAssets/trajectories.csv` y crea un GameObject 
 
 **Inspector:** `csvFile`, `fps`, `cageWidth/Height/Depth` (metros de la jaula virtual), `fishPrefab` (si es null usa `FishFactory`), `turnSpeed`, `playing`, `speed`.
 
-### `SalmonSceneBuilder.cs`
-Clase estática con `[RuntimeInitializeOnLoadMethod]`; se ejecuta automáticamente al dar Play sin necesidad de colocarlo en la escena. Arma el entorno completo:
-- Niebla exponencial azul-verdosa (efecto agua subacuática).
-- Ajusta la luz direccional existente.
-- Construye la red de la jaula cilíndrica con `LineRenderer`s (5 anillos + 28 líneas verticales).
-- Añade `CameraOrbit` a la cámara principal y `SalmonHud` al objeto de la jaula.
+### `SalmonFarmBuilder.cs`
+Componente que arma toda la escena al dar Play. Si no está en la escena, un `[RuntimeInitializeOnLoadMethod]` lo crea con valores por defecto (para cambiarlos, agrégalo a un objeto de la escena).
+- **Inspector:** `rows`, `cols`, `cageSize`, `netDepth`, `spacing`, `deckWidth`, `walkwayWidth`, `meshSize`, `pontoonWidth`, y del entorno `seed`, `lakeRadius`, `mountainCount`, `treeCount`.
+- Lago (shader `SalmonSim/Water`), orilla/fondo low-poly, montañas y árboles: decoración barata (sin sombras, mallas combinadas).
+- Jaulas cuadradas (`FarmCage`): collar sobre flotadores, baranda, red (cintas + velo semitransparente), lastre, contorno de hover y `BoxCollider` para seleccionarla.
+- Pasillos flotantes entre jaulas y hacia el pontón central (caseta, silos, mástil con antenas); boyas de fondeo.
+- Mueve el `TrajectoryPlayer` de la escena dentro de la "Jaula 1" y le agrega `SalmonHud` y `SalmonPanel` (desactivados en la vista general).
+- `SetUnderwater(bool)` cambia el ambiente (niebla de distancia ↔ niebla submarina, sol, color de fondo); `Isolate(cage)` deja visible solo esa jaula.
 
-También contiene `FishFactory`: construye un salmón procesal con cuerpo (esfera achatada), cola (pivot + cubo para aleteo) y aleta dorsal (cubo inclinado). Añade `FishWag` automáticamente.
+### `FarmCage.cs`
+Datos de una jaula (`displayName`, `description`, `player`, `FocusWorld`) y su resaltado (`SetHighlight`).
+
+### `FarmKit.cs`
+Utilidades de construcción: `FarmKit` (primitivas, cono, materiales URP Lit/transparentes), `MeshBatch` (combina primitivas por material) y `MeshBuilder` (mallas de triángulos con sombreado plano).
+
+### `FishFactory.cs`
+Construye un salmón procedural con cuerpo (esfera achatada), cola (pivot + cubo para aleteo) y aleta dorsal (cubo inclinado). Añade `FishWag` automáticamente.
+
+### `Resources/SalmonWater.shader`, `Resources/SalmonUnlitTransparent.shader`
+Shaders URP propios (en `Resources` para que entren en un build): agua con ondas por píxel y Fresnel; color transparente con niebla y desvanecido por profundidad (red, contorno).
 
 ### `FishWag.cs`
 Anima la cola del salmón. En cada `Update()` aplica una rotación senoidal al `TailPivot` con frecuencia (~6.5 Hz) y amplitud (~28°) aleatorias por pez.
 
-### `CameraOrbit.cs`
-Orbita la cámara alrededor de `target` a velocidad constante (`degPerSec = 6`). No requiere input del usuario; funciona solo en modo de demo.
+### `FarmCamera.cs`
+Cámara de la vista general: órbita lenta automática; arrastrar con el mouse rota, la rueda hace zoom. El input se lee con IMGUI (`Event.current`) porque el proyecto usa solo el Input System nuevo.
+
+### `FarmNavigator.cs`
+Interfaz de la vista general: nombre de cada jaula sobre ella y ayuda de controles.
 
 ### `SalmonHud.cs`
 HUD IMGUI (sin Canvas). Muestra en la esquina superior izquierda:
