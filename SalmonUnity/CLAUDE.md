@@ -117,11 +117,13 @@ HUD IMGUI (sin Canvas). Muestra en la esquina superior izquierda:
 
 ## Datos de entrada
 
-El CSV debe estar en `Assets/StreamingAssets/trajectories.csv` con las columnas:
+El CSV debe estar en `Assets/StreamingAssets/trajectories.csv` (copia de `../data/trajectories.csv`) con las columnas:
 `frame, t, id, cx, cy, w, h, conf, z`
 (ver contrato completo en `../CLAUDE.md`).
 
-Las coordenadas `cx`, `cy` (0–1) y `z` (0–1) se mapean a metros de la jaula virtual según `cageWidth`, `cageHeight`, `cageDepth` del `TrajectoryPlayer`.
+`TrajectoryPlayer` usa dos escalas:
+- **Métricas — escala estimada del video** (`videoWidth`, `videoHeight`, `videoDepth`; por defecto 10×5×10 m): `cx`, `cy` (0–1) y `z` (0–1) se convierten a metros con estos valores al cargar el CSV. Velocidades, el umbral `moveSpeedThreshold`, polarización, rotación y las columnas del panel se calculan aquí.
+- **Dibujo** (`cageWidth`, `cageHeight`, `cageDepth`): solo deciden dónde se dibujan los peces dentro de la Jaula 1. `SalmonFarmBuilder` los fija para llenar la red con `dataMargin` (hoy 12×6×12 m). Cambiarlos no altera ninguna métrica.
 
 ## Flujo de prueba estándar
 

@@ -1,44 +1,60 @@
 # Salmon Sim
 
-Video submarino de salmones → detección y tracking → métricas → simulación 3D en Unity.
+Video submarino de salmones → detección y tracking → métricas → salmonera 3D en Unity,
+donde una jaula reproduce los peces reales del video y las demás simulan un cardumen.
 
-## Arranque rápido
+![Vista general de la salmonera](docs/capturas/fase4_vista_general_dia.png)
 
-```bash
-# 1. Generar trayectorias de prueba (ya vienen generadas en data/)
-python tools/generate_fake_trajectories.py --fish 40 --seconds 30
+## Qué hay en el repo
 
-# 2. Copiarlas a Unity
-cp data/trajectories.csv simulation/Assets/StreamingAssets/
-```
+| Carpeta | Contenido |
+|---------|-----------|
+| `vision/` | Pipeline de visión (notebook de Colab, `vision/salmon_vision.ipynb`): YOLOE + ByteTrack → CSV |
+| `data/` | Contrato entre visión y Unity: `trajectories.csv` + `meta.json` |
+| `SalmonUnity/` | Proyecto Unity 6 (URP) con la salmonera |
+| `tools/` | Generador de trayectorias sintéticas |
+| `docs/capturas/` | Capturas de cada fase |
+
+El contrato de datos y las reglas de trabajo están en [`CLAUDE.md`](CLAUDE.md); cada parte
+tiene además su propio `CLAUDE.md`.
+
+## Visión
+
+Video: tramo 1:30–2:00 de "Underwater Salmon Cam – Katmai 2022" (cámara fija en un río).
+YOLOE (`yoloe-11l-seg`, prompt `"fish"`, `imgsz=1280`, `conf=0.25`) + ByteTrack
+(`track_buffer=60`), filtro de IDs de menos de 1 s, profundidad por tamaño aparente y
+suavizado de 7 frames. Resultado: 56 IDs, ~9 peces por frame. Detalle en
+[`vision/CLAUDE.md`](vision/CLAUDE.md).
 
 ## Unity
 
-1. Crea un proyecto Unity 2022.3+ (3D, URP) **en una ruta sin espacios** y copia
-   dentro la carpeta `simulation/Assets`.
-2. Crea un GameObject vacío `Cage`, agrégale `TrajectoryPlayer` y dale Play.
-   Sin prefab asignado usa cápsulas anaranjadas como salmones provisorios.
+1. Abre `SalmonUnity/` con Unity 6 (6000.1).
+2. Abre `Assets/Scenes/SampleScene` y dale Play: toda la salmonera se arma por código.
+3. Unity lee `Assets/StreamingAssets/trajectories.csv`; si regeneras `data/trajectories.csv`,
+   cópialo ahí.
 
-## Conectar Claude Code a Unity (MCP)
+En Play:
+- **Vista general:** arrastrar rota, la rueda hace zoom, clic en una jaula para entrar.
+- **Jaula 1 (datos reales):** los 56 peces del video, con HUD y panel de métricas.
+- **Jaulas 2–8 (simulación):** cardumen boids en anillo. La barra superior cambia
+  etapa, estación y hora; "ⓘ Supuestos" muestra cada supuesto con su fuente.
+- **"← Volver" / Esc:** regresa a la vista general.
 
-Opción recomendada para partir: Unity-MCP de Ivan Murzak.
+## Datos sintéticos (opcional)
 
-1. En Unity: Package Manager → *Add package from git URL*:
-   `https://github.com/IvanMurzak/Unity-MCP.git?path=/Unity-MCP-Plugin/Assets/root`
-2. Abre la ventana del plugin, elige **Claude Code** y pulsa *Configure*.
-3. Con Unity abierto, abre Claude Code en la carpeta del proyecto Unity y
-   verifica con `/mcp` que aparezcan las herramientas.
+```bash
+python tools/generate_fake_trajectories.py --fish 40 --seconds 30 --out data/synthetic
+```
 
-Alternativa: el MCP oficial de Unity (paquete AI Assistant, *Project Settings → AI → Unity MCP*).
+Sin `--out` escribe en `data/` y **reemplaza los datos reales**.
 
-## Flujo con dos agentes
+## Estado
 
-| Terminal | Carpeta | Tarea |
-|----------|---------|-------|
-| Agente 1 | `vision/` | YOLO + ByteTrack → `data/trajectories.csv` |
-| Agente 2 | proyecto Unity | escena, jaula, prefab, UI (vía Unity MCP) |
+Hecho: pipeline de visión sobre Katmai y fases 1–4 de Unity (escena, navegación,
+cardumen simulado, selectores de etapa/estación/hora, supuestos con fuentes).
 
-Cada carpeta tiene su propio `CLAUDE.md`. Solo comparten `data/`.
+Pendiente: fase 5 (alimentación), video de una salmonera real, métricas en Python,
+demo grabada y presentación.
 
 ## Experimento de tokens (opcional)
 
