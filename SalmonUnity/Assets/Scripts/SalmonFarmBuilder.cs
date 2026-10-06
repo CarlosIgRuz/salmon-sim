@@ -6,11 +6,13 @@ using UnityEngine.Rendering;
 /// Arma la salmonera completa al dar Play, todo por código: lago con orilla y
 /// montañas low-poly (decoración), grilla de jaulas cuadradas unidas por pasillos
 /// flotantes, pontón central de operaciones, cámara y navegación.
+/// El fondo, el fondeo y el corte lateral están en SalmonFarmBuilder.Seabed.cs; las
+/// tuberías de alimento y los esparcidores, en SalmonFarmBuilder.Feeding.cs.
 /// Si no hay uno en la escena se crea solo con los valores por defecto; para
 /// cambiar la grilla, agrega este componente a un objeto de la escena.
 /// La "Jaula 1" recibe el TrajectoryPlayer de la escena (datos reales).
 /// </summary>
-public class SalmonFarmBuilder : MonoBehaviour
+public partial class SalmonFarmBuilder : MonoBehaviour
 {
     [Header("Grilla de jaulas")]
     [Min(1)] public int rows = 2;
@@ -46,11 +48,14 @@ public class SalmonFarmBuilder : MonoBehaviour
 
     public IReadOnlyList<FarmCage> Cages => cages;
     public bool Underwater { get; private set; }
+    public bool InSection { get; private set; }
 
     readonly List<FarmCage> cages = new();
     readonly List<GameObject> scenery = new();
     float[] cageX, cageZ;
     float pontoonX, pontoonLength;
+    /// Radio (m) del círculo que contiene el módulo (jaulas + pontón).
+    float moduleRadius;
     Light sun;
     float murk;
 
@@ -90,6 +95,20 @@ public class SalmonFarmBuilder : MonoBehaviour
 
         AttachPlayer(cages[0]);
         for (int i = 1; i < cages.Count; i++) AttachSchool(cages[i], rnd);
+
+        // Fondo, rocas y fondeo quedan visibles bajo el agua (no son parte de `scenery`).
+        var bed = Child("Fondo");
+        BuildSeabed(bed);
+        BuildRocks(bed, new System.Random(seed + 11));
+        BuildMooring(bed);
+        var feed = Child("Alimentacion");
+        BuildFeedLines(feed);
+        scenery.Add(feed.gameObject);
+        BuildSection(Child("Corte lateral"));
+
+        var field = GetComponent<CurrentField>();
+        if (field == null) field = gameObject.AddComponent<CurrentField>();
+        field.waterDepthAt = WaterDepth;
         SetupCamera();
         foreach (var l in FindObjectsByType<Light>(FindObjectsSortMode.None))
             if (l.type == LightType.Directional) { sun = l; break; }
@@ -100,6 +119,13 @@ public class SalmonFarmBuilder : MonoBehaviour
         cond.farm = this;
         cond.nav = GetComponent<FarmNavigator>();
         cond.nav.conditions = cond;
+        cond.field = field;
+        var viz = GetComponent<CurrentViz>();
+        if (viz == null) viz = gameObject.AddComponent<CurrentViz>();
+        viz.farm = this;
+        viz.nav = cond.nav;
+        viz.field = field;
+        cond.viz = viz;
         cond.Apply(immediate: true);
         ApplyNetLook();
         ApplyEnvironment();
@@ -200,7 +226,9 @@ public class SalmonFarmBuilder : MonoBehaviour
     {
         float t = Mathf.SmoothStep(0f, 1f, Night);
         var L = Underwater ? Lighting.Lerp(UnderDay, UnderNight, t) : Lighting.Lerp(SurfaceDay, SurfaceNight, t);
-        RenderSettings.fog = true;
+        // En el corte lateral (cámara ortográfica) no hay niebla: el fondo de agua es un telón.
+        RenderSettings.fog = !InSection;
+        if (backdropMat != null) backdropMat.SetColor("_BaseColor", Color.Lerp(Color.white, new Color(0.25f, 0.3f, 0.4f), t));
         RenderSettings.ambientMode = AmbientMode.Flat;
         RenderSettings.ambientLight = L.ambient;
         RenderSettings.fogColor = L.fog;
@@ -233,6 +261,15 @@ public class SalmonFarmBuilder : MonoBehaviour
         }
         var cam = Camera.main;
         if (cam != null) cam.backgroundColor = L.fog;
+    }
+
+    /// Activa o desactiva la vista "Corte lateral" (geometría del corte y ambiente sin niebla).
+    public void SetSection(bool on)
+    {
+        InSection = on;
+        if (sectionRoot != null) sectionRoot.SetActive(on);
+        Isolate(null);
+        ApplyEnvironment();
     }
 
     /// Deja visible solo `focus` (o todo, si es null).
@@ -327,6 +364,10 @@ public class SalmonFarmBuilder : MonoBehaviour
         cageZ = new float[rows];
         for (int r = 0; r < rows; r++) cageZ[r] = (r - (rows - 1) * 0.5f) * pitch;
         pontoonLength = rows * cageSize + (rows - 1) * spacing;
+
+        float e = cageSize * 0.5f + deckWidth;
+        ModuleBounds = Rect.MinMaxRect(cageX[0] - e, cageZ[0] - e, cageX[cols - 1] + e, cageZ[rows - 1] + e);
+        moduleRadius = new Vector2(ModuleBounds.width, ModuleBounds.height).magnitude * 0.5f;
     }
 
     FarmCage BuildCage(Transform parent, int index, Vector3 pos)
@@ -444,16 +485,6 @@ public class SalmonFarmBuilder : MonoBehaviour
         for (int r = 0; r + 1 < rows; r++)
             for (int c = 0; c < cols; c++)
                 Walkway(b, new Vector3(cageX[c], 0f, cageZ[r] + h), new Vector3(cageX[c], 0f, cageZ[r + 1] - h));
-
-        // Boyas de fondeo alrededor del perímetro
-        float ex = (cageX[cols - 1] - cageX[0]) * 0.5f + cageSize + 14f;
-        float ez = (cageZ[rows - 1] - cageZ[0]) * 0.5f + cageSize + 14f;
-        for (int i = 0; i < 12; i++)
-        {
-            float a = i / 12f * Mathf.PI * 2f + 0.26f;
-            var p = new Vector3(Mathf.Clamp(Mathf.Cos(a) * ex * 1.4f, -ex, ex), 0.2f, Mathf.Clamp(Mathf.Sin(a) * ez * 1.6f, -ez, ez));
-            b.Sphere(Mats.Buoy, p, Vector3.one * 1.3f, Quaternion.identity);
-        }
         b.Build(parent, "Pasillos");
     }
 
@@ -563,8 +594,8 @@ public class SalmonFarmBuilder : MonoBehaviour
         float rr = r + wobble;
         float r0 = lakeRadius * 0.62f, r1 = lakeRadius * 0.80f, r2 = lakeRadius * 0.88f, r3 = lakeRadius * 1.25f;
         float y;
-        if (rr < r0) y = -28f;
-        else if (rr < r1) y = Mathf.Lerp(-28f, -1f, Mathf.SmoothStep(0f, 1f, (rr - r0) / (r1 - r0)));
+        if (rr < r0) y = BedY(x, z);
+        else if (rr < r1) y = Mathf.Lerp(BedY(x, z), -1f, Mathf.SmoothStep(0f, 1f, (rr - r0) / (r1 - r0)));
         else if (rr < r2) y = Mathf.Lerp(-1f, 2.5f, (rr - r1) / (r2 - r1));
         else y = Mathf.Lerp(2.5f, 32f, Mathf.Clamp01((rr - r2) / (r3 - r2)));
         float bumps = (Mathf.PerlinNoise(x * 0.03f + 5f, z * 0.03f + 9f) - 0.5f) * Mathf.Clamp(y, 0f, 30f) * 0.5f;
@@ -606,9 +637,9 @@ public class SalmonFarmBuilder : MonoBehaviour
                 AddGroundTri(shore, g[k, i], g[k + 1, i], g[k + 1, j]);
                 AddGroundTri(shore, g[k, i], g[k + 1, j], g[k, j]);
             }
-        // Fondo plano dentro del anillo
-        for (int i = 0; i < around; i++)
-            AddGroundTri(shore, new Vector3(0f, -28f, 0f), g[0, i], g[0, (i + 1) % around]);
+        // El fondo dentro del anillo lo arma BuildSeabed, cosido a este primer anillo.
+        shoreInnerRing = new Vector3[around];
+        for (int i = 0; i < around; i++) shoreInnerRing[i] = g[0, i];
         MeshBuilder.AddRenderer(parent, "Orilla", shore.ToMesh("Orilla"),
             new[] { Mats.Mud, Mats.Sand, Mats.Grass, Mats.Rock }, false);
     }
@@ -731,5 +762,14 @@ public class SalmonFarmBuilder : MonoBehaviour
         public static readonly Material Net = FarmKit.Transparent("Red", NetSurface, 2950);
         public static readonly Material NetFill = FarmKit.Transparent("Velo", new Color(0.15f, 0.25f, 0.25f, 0.07f), 2940);
         public static readonly Material Outline = FarmKit.Transparent("Contorno", new Color(1f, 0.85f, 0.2f, 0.95f), 3010);
+        // Fondo, fondeo y alimentación (fase 5)
+        public static readonly Material SeabedRock = FarmKit.Lit("RocaFondo", new Color(0.30f, 0.29f, 0.26f), 0.1f);
+        public static readonly Material Rope = FarmKit.Lit("Cabo", new Color(0.85f, 0.70f, 0.30f), 0.2f);
+        public static readonly Material Chain = FarmKit.Lit("Cadena", new Color(0.22f, 0.22f, 0.24f), 0.5f, 0.7f);
+        public static readonly Material AnchorSteel = FarmKit.Lit("Ancla", new Color(0.28f, 0.24f, 0.21f), 0.3f, 0.6f);
+        public static readonly Material CutSediment = FarmKit.Lit("CorteSedimento", new Color(0.36f, 0.31f, 0.22f), 0.05f);
+        public static readonly Material CutRock = FarmKit.Lit("CorteRoca", new Color(0.20f, 0.18f, 0.16f), 0.05f);
+        public static readonly Material Pipe = FarmKit.Lit("Tuberia", new Color(0.86f, 0.86f, 0.82f), 0.4f);
+        public static readonly Material SpreaderFloat = FarmKit.Lit("Esparcidor", new Color(0.95f, 0.55f, 0.10f), 0.35f);
     }
 }

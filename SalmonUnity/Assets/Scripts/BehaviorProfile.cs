@@ -50,9 +50,7 @@ public class BehaviorProfile
     [Range(0f, 1f)] public float ringRadius = 0.55f;
 
     [Header("Alimentación")]
-    [Tooltip("Pellets por segundo que lanza el alimentador (0 = sin alimentación)")]
-    [Range(0f, 20f)] public float feedRate = 0f;
-    [Tooltip("Atracción hacia el alimento; también es la fracción de peces con apetito (0–1)")]
+    [Tooltip("Fracción de peces con hambre durante una comida (0–1); las comidas las maneja FishSchool")]
     [Range(0f, 1f)] public float appetite = 0f;
 
     public BehaviorProfile Clone() => (BehaviorProfile)MemberwiseClone();
@@ -81,7 +79,6 @@ public class BehaviorProfile
             depthWeight = Mathf.Lerp(a.depthWeight, b.depthWeight, t),
             circlingWeight = Mathf.Lerp(a.circlingWeight, b.circlingWeight, t),
             ringRadius = Mathf.Lerp(a.ringRadius, b.ringRadius, t),
-            feedRate = Mathf.Lerp(a.feedRate, b.feedRate, t),
             appetite = Mathf.Lerp(a.appetite, b.appetite, t),
         };
     }

@@ -12,9 +12,10 @@ public static class FarmUi
 }
 
 /// <summary>
-/// Condiciones de la salmonera: etapa, estación y hora. Traduce cada combinación a un
-/// BehaviorProfile para las jaulas simuladas (cambio suave con FishSchool.BlendTo) y a la
-/// luz de la escena (todas las jaulas, incluida la de datos reales).
+/// Condiciones de la salmonera: etapa, estación, hora y corriente. Traduce cada combinación a
+/// un BehaviorProfile para las jaulas simuladas (cambio suave con FishSchool.BlendTo), a las
+/// comidas automáticas, a la luz de la escena (todas las jaulas, incluida la de datos reales)
+/// y a la intensidad de CurrentField.
 /// Dibuja la barra superior de selectores y la ventana "ⓘ Supuestos", que se arma con las
 /// mismas constantes que usa el modelo, así la tabla nunca queda desactualizada.
 /// </summary>
@@ -25,6 +26,9 @@ public class FarmConditions : MonoBehaviour
     public Stage stage = Stage.Engorda;
     public Season season = Season.Verano;
     public TimeOfDay time = TimeOfDay.Dia;
+    public CurrentStrength current = CurrentStrength.Media;
+    public CurrentField field;
+    public CurrentViz viz;
     [Tooltip("Duración (s) del cambio suave entre perfiles")]
     public float blendSeconds = 3f;
 
@@ -57,7 +61,6 @@ public class FarmConditions : MonoBehaviour
     const float BaseDepthSpread = 1.0f;
     const float SummerDayShift = 0.8f, SummerNightShift = -1.5f;  // m (+ = más hondo)
     const float WinterDayShift = 0f, WinterNightShift = -0.5f;
-    const float FeedRate = 3f;                      // pellets/s con apetito completo
     const float MinBodyLengths = 0.4f, MaxBodyLengths = 1.0f;  // BL/s, rango con fuente
 
     static readonly string[] StageLabels = { Stages[0].label, Stages[1].label, Stages[2].label };
@@ -115,15 +118,16 @@ public class FarmConditions : MonoBehaviour
         p.preferredDepth = Mathf.Clamp(ThermalDepth(farm.netDepth) + DayNightShift + cage.depthOffset,
                                        1.2f, farm.netDepth - 1.2f);
         p.appetite = appetite;
-        p.feedRate = FeedRate * appetite;
         return p;
     }
 
+    bool AutoFeed => Stages[(int)stage].feeding && time == TimeOfDay.Dia;
+
     string FeedingNote()
     {
-        if (!Stages[(int)stage].feeding) return "Alimentación: no (ayuno antes de la cosecha)";
-        if (time == TimeOfDay.Noche) return "Alimentación: no (de noche no se alimenta)";
-        return $"Alimentación: sí · apetito {(season == Season.Invierno ? WinterAppetite : 1f) * 100f:F0} % · pellet cae a 0,1 m/s";
+        if (!Stages[(int)stage].feeding) return "Comidas automáticas: no (ayuno antes de la cosecha)";
+        if (time == TimeOfDay.Noche) return "Comidas automáticas: no (de noche no se alimenta)";
+        return $"Comidas automáticas: sí · apetito {(season == Season.Invierno ? WinterAppetite : 1f) * 100f:F0} % de los peces";
     }
 
     /// Aplica las condiciones a todas las jaulas (suave, o al instante al iniciar).
@@ -138,10 +142,19 @@ public class FarmConditions : MonoBehaviour
             else cage.school.BlendTo(p, blendSeconds);
             cage.school.temperatureAt = TemperatureAt;
             cage.school.feedingNote = FeedingNote();
+            cage.school.autoFeed = AutoFeed;
             cage.description = $"{sd.label} · {p.fishCount:F0} peces (muestra) · {p.fishLength * 100f:F0} cm";
         }
         farm.SetNight(time == TimeOfDay.Noche, immediate ? 0f : blendSeconds);
+        if (field != null) field.SetStrength(current, immediate);
         thermalTexDirty = true;
+    }
+
+    public void SetCurrent(CurrentStrength c)
+    {
+        if (c == current) return;
+        current = c;
+        if (field != null) field.SetStrength(c);
     }
 
     public void Set(Stage s, Season se, TimeOfDay t)
@@ -165,6 +178,7 @@ public class FarmConditions : MonoBehaviour
         const string frontiersPhys = "Frontiers in Physiology 2021 (doi 10.3389/fphys.2021.719594)";
         const string frontiersRob = "Frontiers in Robotics and AI 2025 (doi 10.3389/frobt.2025.1574161)";
         const string fao = "FAO, Programa de información de especies acuáticas";
+        const string depomod = "Informe NewDEPOMOD, granja Muck (SEPA)";
         return new List<Assumption>
         {
             new() { what = "Velocidad de crucero", value = "0,4–1,0 largos de cuerpo/s (BL/s); el modelo nunca sale de este rango", source = frontiersPhys },
@@ -187,10 +201,62 @@ public class FarmConditions : MonoBehaviour
             new() { what = "Densidad máxima", value = "20 kg/m³", source = fao },
             new() { what = "Peces mostrados", value = $"muestra representativa: {Stages[0].sampleFish} / {Stages[1].sampleFish} / {Stages[2].sampleFish} (no la densidad real)", source = NoSource },
             new() { what = "Largo según el peso", value = $"W = {LengthWeightK} · L³ (g, cm): {l0:F0} / {l1:F0} / {l2:F0} cm", source = NoSource },
-            new() { what = "Caída del pellet", value = "0,1 m/s", source = NoSource },
+            new() { what = "Caída del pellet", value = "0,095 m/s ±10 % (cada pellet su velocidad)", source = depomod },
+            new() { what = "Comidas", value = FeedingValue(), source = NoSource },
+            new() { what = "Ración y saciedad", value = RationValue(), source = NoSource },
+            new() { what = "Frenesí", value = FrenzyValue(), source = NoSource },
+            new() { what = "Esparcidor rotatorio", value = SpreadValue(), source = NoSource },
+            new() { what = "Corriente media", value = $"Media {CurrentField.MeanSpeeds[1]:F2} m/s (rapidez media en un ciclo y en la columna de agua)", source = depomod },
+            new() { what = "Corriente débil / fuerte", value = $"{CurrentField.MeanSpeeds[0]:F2} / {CurrentField.MeanSpeeds[2]:F2} m/s", source = NoSource },
+            new() { what = "Deriva residual", value = $"rango 0,005–0,065 m/s: débil {CurrentField.ResidualSpeeds[0]:F3} · media {CurrentField.ResidualSpeeds[1]:F3} · fuerte {CurrentField.ResidualSpeeds[2]:F3} m/s", source = depomod },
+            new() { what = "Marea semidiurna", value = $"período {CurrentField.RealTidalPeriodHours:F2} h (componente M2)", source = "Dato astronómico (constituyente M2)" },
+            new() { what = "Tiempo de la marea en la demo", value = TideDemoValue(), source = NoSource },
+            new() { what = "Forma de la marea", value = TideShapeValue(), source = NoSource },
+            new() { what = "Corriente según la profundidad", value = "perfil de potencia 1/7 sobre el fondo (más lenta cerca del fondo)", source = "Soulsby 1997, Dynamics of Marine Sands" },
+            new() { what = "Fondo", value = BedValue(), source = NoSource },
+            new() { what = "Fondeo", value = MooringValue(), source = NoSource },
             new() { what = "Pesos de las reglas boids", value = "separación, alineación, cohesión, red, profundidad y giro", source = NoSource },
         };
     }
+
+    FishSchool AnySchool()
+    {
+        foreach (var c in farm.Cages) if (c.school != null) return c.school;
+        return null;
+    }
+
+    string FeedingValue()
+    {
+        var s = AnySchool();
+        return s == null ? "—" : $"{s.mealSeconds:F0} s cada {s.mealInterval:F0} s de día (tiempo comprimido), o con \"Alimentar ahora\"";
+    }
+
+    string RationValue()
+    {
+        var s = AnySchool();
+        return s == null ? "—" : $"{s.rationPerFish:F0} pellets por pez y comida; un pez se sacia con {s.satiation:F1}";
+    }
+
+    string FrenzyValue()
+    {
+        var s = AnySchool();
+        return s == null ? "—" : $"los peces con hambre suben a ~{s.frenzyDepth:F1} m bajo el esparcidor a {s.frenzySpeed:F1}× su velocidad";
+    }
+
+    string SpreadValue()
+    {
+        var s = AnySchool();
+        return s == null ? "—" : $"lanza la ración en un anillo de {s.spreadInner:F1}–{s.spreadOuter:F1} m de radio";
+    }
+
+    string TideDemoValue() => field == null ? "—" : $"un ciclo de marea dura {field.tidalPeriodSeconds:F0} s";
+
+    string TideShapeValue() => field == null ? "—"
+        : $"eje a {field.tideAxisDeg:F0}° del este, elipse estrecha (eje menor {field.minorAxis * 100f:F0} %), variación espacial ±{field.spatialNoise * 100f:F0} %; deriva hacia {field.residualDeg:F0}°";
+
+    string BedValue() => $"~{farm.seabedDepth:F0} m bajo la salmonera, pendiente {farm.seabedSlope * 100f:F1} % hacia el centro del lago";
+
+    string MooringValue() => $"2 líneas por esquina, alcance {farm.mooringScope:F0}:1 (cabo + cadena hasta un ancla de arrastre)";
 
     // ------------------------------------------------------------------ Interfaz
 
@@ -218,6 +284,11 @@ public class FarmConditions : MonoBehaviour
         GUI.depth = -10; // por encima del resto de la interfaz
         float fs = Mathf.Max(11f, Screen.height / 52f);
         bar.fontSize = barLabel.fontSize = toggle.fontSize = infoButton.fontSize = Mathf.RoundToInt(fs * 0.95f);
+        // Si la barra no cabe en el ancho de la pantalla, achica su letra.
+        float need = BarWidth(), avail = Screen.width - fs * 1.2f;
+        if (need > avail)
+            bar.fontSize = barLabel.fontSize = toggle.fontSize = infoButton.fontSize =
+                Mathf.Max(8, Mathf.FloorToInt(toggle.fontSize * avail / need));
         winTitle.fontSize = Mathf.RoundToInt(fs * 1.3f);
         th.fontSize = td.fontSize = tdSource.fontSize = tdNoSource.fontSize = closeButton.fontSize = Mathf.RoundToInt(fs * 0.9f);
         small.fontSize = Mathf.RoundToInt(fs * 0.8f);
@@ -231,13 +302,35 @@ public class FarmConditions : MonoBehaviour
         int st = Selector("Etapa", (int)stage, StageLabels);
         int se = Selector("Estación", (int)season, SeasonLabels);
         int ti = Selector("Hora", (int)time, TimeLabels);
+        int cu = Selector("Corriente", (int)current, CurrentField.Labels);
+        if (viz != null)
+            viz.show = GUILayout.Toggle(viz.show, viz.show ? "Ver corriente ✓" : "Ver corriente", toggle,
+                                        GUILayout.ExpandWidth(false), GUILayout.ExpandHeight(true));
         GUILayout.FlexibleSpace();
         if (GUILayout.Button("ⓘ Supuestos", infoButton, GUILayout.ExpandHeight(true))) ShowAssumptions = !ShowAssumptions;
         GUILayout.EndHorizontal();
         GUILayout.EndArea();
         Set((Stage)st, (Season)se, (TimeOfDay)ti);
+        SetCurrent((CurrentStrength)cu);
 
         if (ShowAssumptions) DrawAssumptions(fs);
+    }
+
+    /// Ancho (px) que ocupa la barra con la letra actual.
+    float BarWidth()
+    {
+        float w = 0f;
+        void Sel(string label, string[] options)
+        {
+            w += barLabel.CalcSize(new GUIContent(label)).x + barLabel.margin.horizontal + barLabel.fontSize * 1.2f;
+            foreach (var o in options) w += toggle.CalcSize(new GUIContent(o)).x + toggle.margin.horizontal;
+        }
+        Sel("Etapa", StageLabels);
+        Sel("Estación", SeasonLabels);
+        Sel("Hora", TimeLabels);
+        Sel("Corriente", CurrentField.Labels);
+        w += toggle.CalcSize(new GUIContent("Ver corriente ✓")).x + infoButton.CalcSize(new GUIContent("ⓘ Supuestos")).x + 2f * toggle.margin.horizontal;
+        return w * 1.12f; // holgura: márgenes y espacios de GUILayout que no se miden aquí
     }
 
     int Selector(string label, int value, string[] options)
@@ -260,8 +353,8 @@ public class FarmConditions : MonoBehaviour
         GUILayout.FlexibleSpace();
         if (GUILayout.Button("Cerrar ✕", closeButton)) ShowAssumptions = false;
         GUILayout.EndHorizontal();
-        GUILayout.Label("La simulación de las jaulas 2–8 usa estos valores. Lo marcado en naranja " +
-                        "es una elección nuestra sin referencia que la respalde.", small);
+        GUILayout.Label("La simulación de las jaulas 2–8, la corriente y el alimento usan estos valores. Lo marcado " +
+                        "en naranja es una elección nuestra sin referencia que la respalde.", small);
         GUILayout.Space(fs * 0.4f);
         float cw = w - 2f * pad - GUI.skin.verticalScrollbar.fixedWidth - 6f;
         float[] cols = { 0.26f, 0.42f, 0.32f };
@@ -337,7 +430,7 @@ public class FarmConditions : MonoBehaviour
         texOff = Solid(new Color(1f, 1f, 1f, 0.10f));
         texWin = Solid(new Color(0.02f, 0.08f, 0.13f, 0.95f));
         bar = new GUIStyle { normal = { background = texBar } };
-        barLabel = new GUIStyle(GUI.skin.label) { alignment = TextAnchor.MiddleLeft, fontStyle = FontStyle.Bold,
+        barLabel = new GUIStyle(GUI.skin.label) { alignment = TextAnchor.MiddleLeft, fontStyle = FontStyle.Bold, wordWrap = false,
                                                   normal = { textColor = new Color(0.7f, 0.9f, 1f) } };
         toggle = new GUIStyle(GUI.skin.button)
         {

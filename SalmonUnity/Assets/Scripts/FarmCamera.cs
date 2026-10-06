@@ -7,12 +7,14 @@ using UnityEngine;
 /// grilla; dentro de una jaula orbita bajo el agua alrededor de su red. En ambos
 /// modos arrastrar con el mouse rota y la rueda acerca/aleja. Entre uno y otro
 /// vuela por una curva con easing (FlyToCage / FlyToOverview).
+/// Modo Section ("Corte lateral"): cámara ortográfica mirando al norte desde el plano de
+/// corte, con exageración vertical; arrastrar mueve a los lados y la rueda acerca (hasta ×1).
 /// El input se lee con IMGUI (Event.current) porque el proyecto usa solo el Input System nuevo.
 /// </summary>
 [RequireComponent(typeof(Camera))]
 public class FarmCamera : MonoBehaviour
 {
-    public enum Mode { Overview, Transition, Cage }
+    public enum Mode { Overview, Transition, Cage, Section }
 
     [Header("Vista general")]
     public Vector3 overviewTarget = new(0f, -2f, 0f);
@@ -29,6 +31,8 @@ public class FarmCamera : MonoBehaviour
     public float minCageDistance = 9f, maxCageDistance = 30f;
     public float cagePitch = 5f;
     public float minCagePitch = -35f;
+    [Tooltip("Inclinación máxima de la mirada en la jaula: sobre el límite de la superficie la cámara ya no sube, solo mira más hacia abajo")]
+    public float maxCageLookPitch = 70f;
     public float cageAutoSpeed = 4f;
     [Tooltip("Altura máxima (m) de la cámara en la jaula: siempre bajo la superficie")]
     public float maxCageCameraY = -0.5f;
@@ -37,6 +41,10 @@ public class FarmCamera : MonoBehaviour
     public float flightDuration = 1.5f;
     [Tooltip("Altura (m) del punto de control de la curva sobre la jaula: define el picado")]
     public float flightArcHeight = 20f;
+
+    [Header("Corte lateral")]
+    [Tooltip("Metros que se ven detrás del plano de corte")]
+    public float sectionViewDepth = 90f;
 
     [Header("Control con el mouse")]
     public float degreesPerPixel = 0.25f;
@@ -58,6 +66,7 @@ public class FarmCamera : MonoBehaviour
     Vector3 cageTarget;
     float cageYaw, cagePitchNow, cageDist;
     float lastInput = -100f;
+    float secX, secWidth, secMaxWidth, secLimitX, secBottom, secTop, secCutZ, savedNear, savedFar;
     bool dragging;
     float dragDist;
 
@@ -66,6 +75,7 @@ public class FarmCamera : MonoBehaviour
     void LateUpdate()
     {
         if (CurrentMode == Mode.Transition) return;
+        if (CurrentMode == Mode.Section) { SectionPose(); return; }
         bool idle = Time.unscaledTime - lastInput > idleBeforeAuto;
         Vector3 p; Quaternion r;
         if (CurrentMode == Mode.Overview)
@@ -88,11 +98,18 @@ public class FarmCamera : MonoBehaviour
 
     void CagePose(out Vector3 p, out Quaternion r)
     {
-        // Limita el pitch para que la cámara no salga del agua.
+        float maxPitch = MaxCagePitch();
+        // Más allá del límite la cámara se queda bajo la superficie e inclina la mirada (ver el fondo).
+        cagePitchNow = Mathf.Clamp(cagePitchNow, minCagePitch, Mathf.Max(maxPitch, maxCageLookPitch));
+        OrbitPose(cageTarget, cageYaw, Mathf.Min(cagePitchNow, maxPitch), cageDist, out p, out _);
+        r = Quaternion.Euler(cagePitchNow, cageYaw, 0f);
+    }
+
+    /// Pitch de órbita más alto con la cámara aún bajo la superficie.
+    float MaxCagePitch()
+    {
         float maxSin = (maxCageCameraY - cageTarget.y) / cageDist;
-        float maxPitch = maxSin >= 1f ? 89f : Mathf.Asin(Mathf.Clamp(maxSin, -1f, 1f)) * Mathf.Rad2Deg;
-        cagePitchNow = Mathf.Clamp(cagePitchNow, minCagePitch, maxPitch);
-        OrbitPose(cageTarget, cageYaw, cagePitchNow, cageDist, out p, out r);
+        return maxSin >= 1f ? 89f : Mathf.Asin(Mathf.Clamp(maxSin, -1f, 1f)) * Mathf.Rad2Deg;
     }
 
     /// Pose de órbita: mira a target desde dist, con yaw/pitch en grados (pitch > 0 = desde arriba).
@@ -114,8 +131,8 @@ public class FarmCamera : MonoBehaviour
         if (CurrentMode != Mode.Overview) return;
         cageTarget = focus;
         cageYaw = yaw;
-        cagePitchNow = pitch ?? cagePitch;
         cageDist = dist ?? cageDistance;
+        cagePitchNow = Mathf.Min(pitch ?? cagePitch, MaxCagePitch()); // al llegar, mirando al foco
         StartCoroutine(Fly(true, onSurface, onArrive));
     }
 
@@ -160,6 +177,55 @@ public class FarmCamera : MonoBehaviour
         onArrive?.Invoke();
     }
 
+    // ------------------------------------------------------------------ Corte lateral
+
+    /// Exageración vertical actual del corte (1 = escala real).
+    public float SectionExaggeration => secWidth / Mathf.Max(Cam.aspect, 0.1f) / Mathf.Max(secTop - secBottom, 0.1f);
+
+    /// Pasa al corte lateral: plano en z = cutZ (todo lo que está delante se recorta), x en
+    /// ±halfWidth y profundidades de bottom a top. Empieza mostrando todo el ancho.
+    public void EnterSection(float cutZ, float halfWidth, float bottom, float top)
+    {
+        if (CurrentMode != Mode.Overview) return;
+        secCutZ = cutZ; secLimitX = halfWidth; secBottom = bottom; secTop = top;
+        secMaxWidth = 2f * halfWidth;
+        secWidth = secMaxWidth;
+        secX = 0f;
+        savedNear = Cam.nearClipPlane;
+        savedFar = Cam.farClipPlane;
+        Cam.orthographic = true;
+        Cam.nearClipPlane = 0.5f;
+        Cam.farClipPlane = sectionViewDepth;
+        dragging = false;
+        CurrentMode = Mode.Section;
+        SectionPose();
+    }
+
+    public void ExitSection()
+    {
+        if (CurrentMode != Mode.Section) return;
+        Cam.ResetProjectionMatrix();
+        Cam.orthographic = false;
+        Cam.nearClipPlane = savedNear;
+        Cam.farClipPlane = savedFar;
+        CurrentMode = Mode.Overview;
+        lastInput = Time.unscaledTime;
+    }
+
+    void SectionPose()
+    {
+        float h = secTop - secBottom;
+        float minWidth = h * Cam.aspect; // exageración ×1
+        secWidth = Mathf.Clamp(secWidth, minWidth, Mathf.Max(secMaxWidth, minWidth));
+        float half = secWidth * 0.5f;
+        secX = half >= secLimitX ? 0f : Mathf.Clamp(secX, -secLimitX + half, secLimitX - half);
+        float midY = (secTop + secBottom) * 0.5f;
+        // La cámara queda medio metro antes del corte: el plano cercano (0,5 m) es el corte.
+        transform.SetPositionAndRotation(new Vector3(secX, midY, secCutZ - 0.5f), Quaternion.identity);
+        Cam.orthographicSize = h * 0.5f;
+        Cam.projectionMatrix = Matrix4x4.Ortho(-half, half, -h * 0.5f, h * 0.5f, Cam.nearClipPlane, Cam.farClipPlane);
+    }
+
     // ------------------------------------------------------------------ Input
 
     public void Orbit(Vector2 pixelDelta)
@@ -176,6 +242,8 @@ public class FarmCamera : MonoBehaviour
             cageYaw += dy;
             cagePitchNow += dp; // CagePose lo limita
         }
+        else if (CurrentMode == Mode.Section)
+            secX -= pixelDelta.x * secWidth / Mathf.Max(Screen.width, 1); // SectionPose lo limita
     }
 
     public void Zoom(float wheel)
@@ -186,6 +254,8 @@ public class FarmCamera : MonoBehaviour
             overviewDistance = Mathf.Clamp(overviewDistance * f, minOverviewDistance, maxOverviewDistance);
         else if (CurrentMode == Mode.Cage)
             cageDist = Mathf.Clamp(cageDist * f, minCageDistance, maxCageDistance);
+        else if (CurrentMode == Mode.Section)
+            secWidth *= f; // SectionPose lo limita
     }
 
     void OnGUI()

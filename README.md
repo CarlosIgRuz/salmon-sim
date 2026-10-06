@@ -37,7 +37,12 @@ En Play:
 - **Vista general:** arrastrar rota, la rueda hace zoom, clic en una jaula para entrar.
 - **Jaula 1 (datos reales):** los 56 peces del video, con HUD y panel de métricas.
 - **Jaulas 2–8 (simulación):** cardumen boids en anillo. La barra superior cambia
-  etapa, estación y hora; "ⓘ Supuestos" muestra cada supuesto con su fuente.
+  etapa, estación, hora y corriente; "ⓘ Supuestos" muestra cada supuesto con su fuente.
+- **Alimentación:** comidas automáticas de día y botón "Alimentar ahora". Los peces con
+  hambre suben al esparcidor; los pellets que nadie come se los lleva la corriente y
+  salen por la red ("Alimento no consumido (%)").
+- **Corte lateral** (botón en la vista general): fondo a ~35 m, fondeo con anclas y
+  perfil de la corriente por profundidad.
 - **"← Volver" / Esc:** regresa a la vista general.
 
 ## Datos sintéticos (opcional)
@@ -50,11 +55,12 @@ Sin `--out` escribe en `data/` y **reemplaza los datos reales**.
 
 ## Estado
 
-Hecho: pipeline de visión sobre Katmai y fases 1–4 de Unity (escena, navegación,
-cardumen simulado, selectores de etapa/estación/hora, supuestos con fuentes).
+Hecho: pipeline de visión sobre Katmai y fases 1–5 de Unity (escena, navegación,
+cardumen simulado, selectores de etapa/estación/hora, supuestos con fuentes; fondo,
+fondeo, corriente y alimentación con alimento no consumido).
 
-Pendiente: fase 5 (alimentación), video de una salmonera real, métricas en Python,
-demo grabada y presentación.
+Pendiente: fase 6, video de una salmonera real, métricas en Python, demo grabada y
+presentación.
 
 ## Experimento de tokens (opcional)
 

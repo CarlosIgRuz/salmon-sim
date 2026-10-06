@@ -5,8 +5,12 @@ using UnityEngine.Rendering;
 /// <summary>
 /// Cardumen simulado (boids) dentro de una jaula cuadrada. Reglas: separación,
 /// alineación, cohesión, evitar la red (fuerza suave + límite duro: nunca la cruzan),
-/// profundidad preferida, giro en anillo alrededor del centro y, si el perfil lo
-/// indica, alimentación (pellets que caen desde el centro; los peces con apetito los siguen).
+/// profundidad preferida y giro en anillo alrededor del centro.
+/// Alimentación por comidas (automáticas o "Alimentar ahora"): el esparcidor del centro
+/// lanza la ración en un anillo; los peces con hambre (fracción `appetite` del perfil) suben
+/// bajo el esparcidor en frenesí, comen hasta saciarse y vuelven a su capa. Los pellets caen
+/// a pelletSinkSpeed ±10 %, arrastrados por CurrentField; los que nadie come salen por la red
+/// y cuentan como alimento no consumido (MealStats).
 /// Coordenadas locales de la jaula: superficie en y=0, red en |x|,|z| ≤ halfSize,
 /// fondo en y = -netDepth.
 /// Rendimiento: vecinos con grilla espacial; todos los peces se dibujan con una
@@ -33,13 +37,33 @@ public class FishSchool : MonoBehaviour, IFishSource
     public float hardMargin = 0.35f;
 
     [Header("Alimentación")]
-    [Tooltip("Velocidad de caída del pellet (m/s). Supuesto sin fuente.")]
-    public float pelletSinkSpeed = 0.1f;
-    [Tooltip("Radio (m) del área donde cae el alimento, alrededor del centro")]
-    public float feedRadius = 2.5f;
-    public int maxPellets = 400;
+    [Tooltip("Velocidad media de caída del pellet (m/s). Fuente: NewDEPOMOD, granja Muck (SEPA).")]
+    public float pelletSinkSpeed = 0.095f;
+    [Tooltip("Variación de la caída entre pellets (± fracción). Fuente: NewDEPOMOD, granja Muck (SEPA).")]
+    public float pelletSinkVariation = 0.1f;
+    [Tooltip("Radios (m) del anillo donde el esparcidor rotatorio lanza los pellets")]
+    public float spreadInner = 1f, spreadOuter = 4.5f;
+    public int maxPellets = 2500;
+    [Tooltip("Pellets por pez en cada comida (cada pellet dibujado representa muchos)")]
+    public float rationPerFish = 3f;
+    [Tooltip("Pellets que sacian a un pez")]
+    public float satiation = 3.5f;
+    [Tooltip("Duración (s) de una comida")]
+    public float mealSeconds = 40f;
+    [Tooltip("Tiempo (s) entre el inicio de dos comidas automáticas")]
+    public float mealInterval = 180f;
+    [Tooltip("Profundidad (m) bajo el esparcidor a la que suben los peces con hambre")]
+    public float frenzyDepth = 1.2f;
+    [Tooltip("Velocidad en el frenesí (× la de crucero)")]
+    public float frenzySpeed = 1.6f;
+    [Tooltip("Segundos que se sigue dibujando un pellet después de salir por la red")]
+    public float lostFadeSeconds = 15f;
+    [Tooltip("Cabezal del esparcidor (lo crea SalmonFarmBuilder); gira durante las comidas")]
+    public Transform spreaderRotor;
 
     [Header("Condiciones (las fija FarmConditions)")]
+    [Tooltip("Comidas automáticas cada mealInterval (de día y si la etapa se alimenta)")]
+    public bool autoFeed;
     [Tooltip("Texto de alimentación para el panel")]
     public string feedingNote = "";
     /// Temperatura del agua (°C) según la profundidad (m); null = sin perfil térmico.
@@ -52,6 +76,8 @@ public class FishSchool : MonoBehaviour, IFishSource
     Vector3[] pos, vel;
     Quaternion[] rot;
     float[] speedU, depthU, sizeMul; // valores por pez en [-1,1] / factor de tamaño
+    float[] hungerU, gut;            // con hambre si hungerU < appetite; gut = pellets comidos en la comida
+    int[] foodTarget;
     Matrix4x4[] matrices;
     int[] cellOf, sorted, cellStart, cursor;
     int gx, gy, gz;
@@ -59,11 +85,18 @@ public class FishSchool : MonoBehaviour, IFishSource
     int selected = -1;
     BehaviorProfile blendFrom;
     float blendT = 1f, blendDuration;
-    Vector3[] pellets;
+    struct Pellet
+    {
+        public Vector3 p;
+        public float sink;   // m/s
+        public int meal;     // id de la comida que lo lanzó
+        public float lostAt; // < 0: dentro de la red; si no, Time.time al salir
+    }
+    Pellet[] pellets;
     Matrix4x4[] pelletMatrices;
     int pelletCount;
-    float pelletAccum;
-    Vector3 pelletCentroid;
+    float pelletAccum, nextMeal, rotorSpeed;
+    MealStats meal;
     System.Random pelletRnd;
     readonly List<float> depthScratch = new();
     SchoolStats cachedStats;
@@ -107,7 +140,8 @@ public class FishSchool : MonoBehaviour, IFishSource
         speedU = new float[n]; depthU = new float[n]; sizeMul = new float[n];
         matrices = new Matrix4x4[n];
         cellOf = new int[n]; sorted = new int[n];
-        pellets = new Vector3[maxPellets];
+        hungerU = new float[n]; gut = new float[n]; foodTarget = new int[n];
+        pellets = new Pellet[maxPellets];
         pelletMatrices = new Matrix4x4[maxPellets];
         pelletRnd = new System.Random(seed + 7);
 
@@ -118,6 +152,7 @@ public class FishSchool : MonoBehaviour, IFishSource
             speedU[i] = R() + R() - 1f; // triangular en [-1,1]
             depthU[i] = R() + R() - 1f;
             sizeMul[i] = 0.88f + 0.24f * R();
+            hungerU[i] = R();
             float a = R() * Mathf.PI * 2f;
             float r = profile.ringRadius * halfSize * (0.6f + 0.8f * R());
             float y = -Mathf.Clamp(profile.preferredDepth + depthU[i] * profile.depthSpread,
@@ -137,6 +172,7 @@ public class FishSchool : MonoBehaviour, IFishSource
         ActiveCount = fullQuality ? want : Mathf.Min(want, liteFishCount);
         if (dt > 0f)
         {
+            UpdateMeal(dt);
             UpdatePellets(dt, Current);
             Step(ActiveCount, dt, Current);
         }
@@ -164,12 +200,14 @@ public class FishSchool : MonoBehaviour, IFishSource
         float ringR = P.ringRadius * (h - hardMargin);
         float minY = -netDepth + hardMargin, maxY = -hardMargin;
         float turn = 1f - Mathf.Exp(-6f * dt);
+        bool feeding = FeedingTime;
 
         for (int i = 0; i < n; i++)
         {
             var p = pos[i];
             var v = vel[i];
-            float desired = P.meanSpeed * (1f + speedU[i] * P.speedVariation);
+            bool hungry = feeding && IsHungry(i, P);
+            float desired = P.meanSpeed * (1f + speedU[i] * P.speedVariation) * (hungry ? frenzySpeed : 1f);
 
             // --- Vecinos (grilla de 3×3×3 celdas)
             Vector3 sep = Vector3.zero, ali = Vector3.zero, coh = Vector3.zero;
@@ -209,24 +247,26 @@ public class FishSchool : MonoBehaviour, IFishSource
                 acc += (coh / nb - p) * (P.cohesionWeight * 0.5f);
                 acc += sep * (P.separationWeight * 0.4f);
             }
-            float targetY = Mathf.Clamp(-(P.preferredDepth + depthU[i] * P.depthSpread), minY + 0.3f, maxY - 0.3f);
-            acc.y += ((targetY - p.y) * 0.5f - v.y) * P.depthWeight;
-
-            var radial = new Vector3(p.x, 0f, p.z);
-            float r = radial.magnitude;
-            if (r > 1e-3f)
+            if (hungry)
             {
-                var flat = new Vector3(v.x, 0f, v.z);
-                var want = Tangent(p) * desired + radial / r * ((ringR - r) * 0.4f);
-                acc += (want - flat) * (P.circlingWeight * 0.5f);
-            }
-            // Alimentación: la fracción `appetite` de los peces (los de depthU más bajo) va hacia el alimento.
-            if (pelletCount > 0 && (depthU[i] + 1f) * 0.5f < P.appetite)
-            {
-                // Cada pez con apetito sigue "su" pellet: se reparten en vez de ir todos al mismo punto.
-                var toFood = pellets[(i * 7919) % pelletCount] - p;
+                // Frenesí: deja su capa y el anillo y va hacia el alimento (o bajo el esparcidor).
+                var toFood = FoodTarget(i, p) - p;
                 float dist = toFood.magnitude;
-                if (dist > 0.2f) acc += (toFood / dist * desired * 1.3f - v) * 1.5f;
+                if (dist > 0.15f) acc += (toFood / dist * desired - v) * 2f;
+            }
+            else
+            {
+                float targetY = Mathf.Clamp(-(P.preferredDepth + depthU[i] * P.depthSpread), minY + 0.3f, maxY - 0.3f);
+                acc.y += ((targetY - p.y) * 0.5f - v.y) * P.depthWeight;
+
+                var radial = new Vector3(p.x, 0f, p.z);
+                float r = radial.magnitude;
+                if (r > 1e-3f)
+                {
+                    var flat = new Vector3(v.x, 0f, v.z);
+                    var want = Tangent(p) * desired + radial / r * ((ringR - r) * 0.4f);
+                    acc += (want - flat) * (P.circlingWeight * 0.5f);
+                }
             }
             if (P.wander > 0f)
             {
@@ -236,7 +276,7 @@ public class FishSchool : MonoBehaviour, IFishSource
             }
             float sp = v.magnitude;
             if (sp > 1e-3f) acc += v / sp * ((desired - sp) * 2f);
-            acc = Vector3.ClampMagnitude(acc, P.maxAccel);
+            acc = Vector3.ClampMagnitude(acc, P.maxAccel * (hungry ? 2f : 1f));
 
             // --- Red, fondo y superficie: empuje suave que crece al acercarse (no se limita)
             float m = Mathf.Max(P.wallMargin, 0.05f), w = P.wallWeight * 1.5f;
@@ -269,35 +309,195 @@ public class FishSchool : MonoBehaviour, IFishSource
         }
     }
 
-    /// Pellets: caen a pelletSinkSpeed desde la superficie, en el área central; un pez a
-    /// menos de 1,5 largos de cuerpo se lo come. Solo en la jaula abierta.
+    // ------------------------------------------------------------------ Alimentación
+
+    /// Una comida: ración lanzada, pellets comidos y perdidos (salieron por la red).
+    public struct MealStats
+    {
+        public int id, ration, delivered, eaten, lost;
+        public bool active, manual;
+        /// Parte de la comida ocurrió con la jaula cerrada (sin pellets simulados): cifras incompletas.
+        public bool partial;
+        public float elapsed;
+        public int InWater => delivered - eaten - lost;
+        /// Fracción del alimento entregado que nadie comió (perdido / entregado).
+        public float Unconsumed => delivered > 0 ? lost / (float)delivered : 0f;
+    }
+
+    /// Comida en curso, o la última (id = 0: todavía ninguna).
+    public MealStats Meal => meal;
+    /// Última comida terminada y sin pellets suyos en la red (id = 0: ninguna). Se mantiene
+    /// mientras corre la siguiente, para comparar.
+    public MealStats LastMeal => lastMeal;
+    MealStats lastMeal;
+    /// Hay comida en curso o quedan pellets suyos dentro de la red.
+    public bool FeedingTime => meal.active || meal.InWater > 0;
+    /// Segundos hasta la próxima comida automática (< 0 si no hay comidas automáticas).
+    public float NextMealIn => autoFeed && !meal.active ? Mathf.Max(0f, nextMeal - Time.time) : -1f;
+
+    /// Peces con hambre en esta comida (fracción `appetite` del perfil).
+    public int HungryCount
+    {
+        get
+        {
+            if (pos == null || Current == null) return 0;
+            int k = 0;
+            for (int i = 0; i < ActiveCount; i++) if (hungerU[i] < Current.appetite) k++;
+            return k;
+        }
+    }
+
+    /// "Alimentar ahora": empieza una comida si no hay otra en curso.
+    public bool FeedNow() => StartMeal(manual: true);
+
+    bool StartMeal(bool manual)
+    {
+        if (meal.active || pos == null) return false;
+        // Si quedaban pellets de la anterior ya no se cuentan: su resultado queda incompleto.
+        if (meal.id > 0 && meal.delivered > 0 && lastMeal.id != meal.id)
+        {
+            lastMeal = meal;
+            lastMeal.partial |= meal.InWater > 0;
+        }
+        meal = new MealStats
+        {
+            id = meal.id + 1, active = true, manual = manual, partial = !fullQuality,
+            ration = Mathf.RoundToInt(rationPerFish * Mathf.Round(Current.fishCount)),
+        };
+        pelletAccum = 0f;
+        System.Array.Clear(gut, 0, gut.Length);
+        nextMeal = Time.time + mealInterval;
+        return true;
+    }
+
+    void UpdateMeal(float dt)
+    {
+        // Sin comidas automáticas el reloj se reinicia; al activarlas, la primera llega
+        // tras una espera distinta en cada jaula (no comen todas a la vez).
+        if (!autoFeed && !meal.active) nextMeal = Time.time + 8f + (seed % 7) * 5f;
+        if (autoFeed && !meal.active && Time.time >= nextMeal) StartMeal(manual: false);
+        if (meal.active)
+        {
+            meal.elapsed += dt;
+            if (!fullQuality) meal.partial = true;
+            if (meal.elapsed >= mealSeconds) meal.active = false;
+        }
+        if (!meal.active && meal.InWater == 0 && meal.delivered > 0) lastMeal = meal;
+        if (spreaderRotor != null)
+        {
+            rotorSpeed = Mathf.MoveTowards(rotorSpeed, meal.active ? 240f : 0f, 300f * dt);
+            spreaderRotor.Rotate(0f, rotorSpeed * dt, 0f, Space.Self);
+        }
+    }
+
+    bool IsHungry(int i, BehaviorProfile P) => hungerU[i] < P.appetite && gut[i] < satiation;
+
+    /// Hacia dónde nada un pez con hambre: "su" pellet si está cerca (se reelige cada ~0,5 s
+    /// entre unas muestras al azar), si no, un punto propio del anillo bajo el esparcidor.
+    Vector3 FoodTarget(int i, Vector3 p)
+    {
+        if (pelletCount > 0)
+        {
+            int k = foodTarget[i];
+            if (k >= pelletCount || pellets[k].lostAt >= 0f || (Time.frameCount + i) % 30 == 0)
+            {
+                float best = float.MaxValue;
+                k = -1;
+                for (int s = 0; s < 6; s++)
+                {
+                    int c = (int)((uint)(i * 7919 + Time.frameCount * 31 + s * 104729) % (uint)pelletCount);
+                    if (pellets[c].lostAt >= 0f) continue;
+                    float d2 = (pellets[c].p - p).sqrMagnitude;
+                    if (d2 < best) { best = d2; k = c; }
+                }
+                foodTarget[i] = k < 0 ? int.MaxValue : k;
+            }
+            k = foodTarget[i];
+            if (k < pelletCount && (pellets[k].p - p).sqrMagnitude < 16f) return pellets[k].p;
+        }
+        float a = i * 2.39996f;
+        float rr = Mathf.Lerp(spreadInner, spreadOuter, Mathf.Repeat(i * 0.618034f, 1f));
+        return new Vector3(Mathf.Cos(a) * rr, -frenzyDepth - (i % 5) * 0.2f, Mathf.Sin(a) * rr);
+    }
+
+    /// Pellets (solo en la jaula abierta): el esparcidor lanza la ración durante la comida;
+    /// caen a su velocidad, la corriente los arrastra y un pez con hambre a menos de 1,5 largos
+    /// de cuerpo se lo come. Si salen por la red (lados o fondo) se cuentan como no consumidos.
     void UpdatePellets(float dt, BehaviorProfile P)
     {
         if (!fullQuality) { pelletCount = 0; pelletAccum = 0f; return; }
-        pelletAccum += P.feedRate * dt;
-        while (pelletAccum >= 1f && pelletCount < pellets.Length)
+        if (meal.active)
         {
-            pelletAccum -= 1f;
-            float a = (float)pelletRnd.NextDouble() * Mathf.PI * 2f;
-            float r = feedRadius * Mathf.Sqrt((float)pelletRnd.NextDouble());
-            pellets[pelletCount++] = new Vector3(Mathf.Cos(a) * r, -0.15f, Mathf.Sin(a) * r);
+            pelletAccum += meal.ration / Mathf.Max(mealSeconds, 0.1f) * dt;
+            while (pelletAccum >= 1f && meal.delivered < meal.ration && pelletCount < pellets.Length)
+            {
+                pelletAccum -= 1f;
+                float a = (float)pelletRnd.NextDouble() * Mathf.PI * 2f;
+                float r = Mathf.Lerp(spreadInner, spreadOuter, Mathf.Sqrt((float)pelletRnd.NextDouble()));
+                float sink = pelletSinkSpeed * (1f + pelletSinkVariation * (2f * (float)pelletRnd.NextDouble() - 1f));
+                pellets[pelletCount++] = new Pellet
+                {
+                    p = new Vector3(Mathf.Cos(a) * r, -0.1f, Mathf.Sin(a) * r), sink = sink, meal = meal.id, lostAt = -1f,
+                };
+                meal.delivered++;
+            }
+            pelletAccum = Mathf.Min(pelletAccum, 1f);
         }
-        pelletAccum = Mathf.Min(pelletAccum, 1f);
         if (pelletCount == 0) return;
+
         float eat2 = Mathf.Pow(Mathf.Max(0.3f, P.fishLength * 1.5f), 2f);
-        var sum = Vector3.zero;
+        var field = CurrentField.Instance;
+        float now = Time.time;
         for (int k = 0; k < pelletCount; k++)
         {
-            var q = pellets[k];
-            q.y -= pelletSinkSpeed * dt;
-            bool gone = q.y < -netDepth + 0.1f;
-            for (int i = 0; !gone && i < ActiveCount; i++)
-                gone = (pos[i] - q).sqrMagnitude < eat2;
-            if (gone) { pellets[k] = pellets[--pelletCount]; k--; continue; }
-            pellets[k] = q;
-            sum += q;
+            ref var pe = ref pellets[k];
+            var drift = field != null ? transform.InverseTransformVector(field.At(transform.TransformPoint(pe.p), now)) : Vector3.zero;
+            pe.p += new Vector3(drift.x, -pe.sink, drift.z) * dt;
+            bool gone;
+            if (pe.lostAt < 0f)
+            {
+                if (Mathf.Abs(pe.p.x) > halfSize || Mathf.Abs(pe.p.z) > halfSize || pe.p.y < -netDepth)
+                {
+                    pe.lostAt = now;
+                    if (pe.meal == meal.id) meal.lost++;
+                    gone = false;
+                }
+                else
+                {
+                    gone = TryEat(pe.p, eat2, P);
+                    if (gone && pe.meal == meal.id) meal.eaten++;
+                }
+            }
+            else gone = now - pe.lostAt > lostFadeSeconds;
+            if (gone) { pellets[k] = pellets[--pelletCount]; k--; }
         }
-        if (pelletCount > 0) pelletCentroid = sum / pelletCount;
+    }
+
+    /// ¿Hay un pez con hambre a menos de √r2 del pellet? Busca en la grilla de vecinos del último paso.
+    bool TryEat(Vector3 q, float r2, BehaviorProfile P)
+    {
+        if (cellStart == null || cellSize <= 0f) return false;
+        Cell(q, out int cx, out int cy, out int cz);
+        for (int dx = -1; dx <= 1; dx++)
+        {
+            int x = cx + dx; if (x < 0 || x >= gx) continue;
+            for (int dy = -1; dy <= 1; dy++)
+            {
+                int y = cy + dy; if (y < 0 || y >= gy) continue;
+                for (int dz = -1; dz <= 1; dz++)
+                {
+                    int z = cz + dz; if (z < 0 || z >= gz) continue;
+                    int c = (x * gy + y) * gz + z;
+                    for (int k = cellStart[c]; k < cellStart[c + 1]; k++)
+                    {
+                        int j = sorted[k];
+                        if (j >= ActiveCount || !IsHungry(j, P)) continue;
+                        if ((pos[j] - q).sqrMagnitude < r2) { gut[j] += 1f; return true; }
+                    }
+                }
+            }
+        }
+        return false;
     }
 
     /// 0 lejos de la pared; crece cuadráticamente hasta 1 al tocarla (d = distancia).
@@ -382,9 +582,11 @@ public class FishSchool : MonoBehaviour, IFishSource
         {
             // Pellets exagerados (8 cm) para que se vean desde la cámara.
             for (int q = 0; q < pelletCount; q++)
-                pelletMatrices[q] = l2w * Matrix4x4.TRS(pellets[q], Quaternion.identity, Vector3.one * 0.08f);
+                pelletMatrices[q] = l2w * Matrix4x4.TRS(pellets[q].p, Quaternion.identity, Vector3.one * 0.08f);
             var prp = rp;
             prp.material = pelletMat;
+            // Los pellets perdidos siguen cayendo fuera de la red.
+            prp.worldBounds = new Bounds(bounds.center, bounds.size + new Vector3(12f, 6f, 12f));
             Graphics.RenderMeshInstanced(prp, FarmKit.Sphere, 0, pelletMatrices, pelletCount);
         }
         if (selected >= 0 && selected < n)
@@ -450,7 +652,10 @@ public class FishSchool : MonoBehaviour, IFishSource
             string temp = temperatureAt != null
                 ? $"Agua a {st.meanDepth:F1} m: {temperatureAt(st.meanDepth):F1} °C (cómodo 8–20 °C)"
                 : "Sin perfil térmico";
-            return string.IsNullOrEmpty(feedingNote) ? temp : temp + "\n" + feedingNote;
+            string s = string.IsNullOrEmpty(feedingNote) ? temp : temp + "\n" + feedingNote;
+            if (lastMeal.id > 0)
+                s += $"\nÚltima comida: alimento no consumido {lastMeal.Unconsumed * 100f:F0} %{(lastMeal.partial ? " (parcial)" : "")}";
+            return s;
         }
     }
 

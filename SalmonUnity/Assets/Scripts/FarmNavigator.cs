@@ -7,7 +7,11 @@ using UnityEngine;
 ///   salmones (datos reales o simulación) y, con datos reales, el HUD del video.
 /// Solo la jaula abierta simula su cardumen completo (FishSchool.fullQuality).
 /// Al cruzar la superficie cambia el ambiente y se ocultan/restauran el resto de la escena.
-/// Para probar por código: EnterCage(i), ExitCage(), forcedHover.
+/// - Corte lateral (botón en la vista general): vista de costado con el fondo, el fondeo y el
+///   perfil de la corriente; escala de profundidad y rótulos.
+/// - En las jaulas simuladas: recuadro de alimentación ("Alimentar ahora", estado de la comida y
+///   alimento no consumido). En todas las vistas: la corriente en el lugar.
+/// Para probar por código: EnterCage(i), ExitCage(), EnterSection(), ExitSection(), forcedHover.
 /// </summary>
 public class FarmNavigator : MonoBehaviour
 {
@@ -26,10 +30,11 @@ public class FarmNavigator : MonoBehaviour
     /// Jaula abierta (o hacia la que se vuela); null en la vista general.
     public FarmCage Current { get; private set; }
     public bool Busy => cam != null && cam.CurrentMode == FarmCamera.Mode.Transition;
+    public bool InSection => cam != null && cam.CurrentMode == FarmCamera.Mode.Section;
 
-    GUIStyle label, labelHover, hint, title, sub, button, empty, badgeReal, badgeSim;
-    Texture2D texLabel, texHover, texButton, texButtonHover, texReal, texSim;
-    Rect backRect;
+    GUIStyle label, labelHover, hint, title, sub, button, empty, badgeReal, badgeSim, panelBox, boxTitle, boxText, scaleText;
+    Texture2D texLabel, texHover, texButton, texButtonHover, texReal, texSim, texBox, texBarBg, texEaten, texLost;
+    Rect backRect, sectionRect, feedRect;
 
     void Start()
     {
@@ -40,7 +45,7 @@ public class FarmNavigator : MonoBehaviour
     void OnDestroy()
     {
         if (cam != null) cam.Clicked -= OnClick;
-        foreach (var t in new[] { texLabel, texHover, texButton, texButtonHover, texReal, texSim })
+        foreach (var t in new[] { texLabel, texHover, texButton, texButtonHover, texReal, texSim, texBox, texBarBg, texEaten, texLost })
             if (t != null) Destroy(t);
     }
 
@@ -83,6 +88,24 @@ public class FarmNavigator : MonoBehaviour
             SetPickColliders(true);
             Current = null;
         });
+    }
+
+    /// Vista "Corte lateral": de costado, desde el sur, con el agua recortada delante del módulo.
+    public void EnterSection()
+    {
+        if (Current != null || Busy || InSection) return;
+        SetHover(null);
+        SetPickColliders(false);
+        farm.SetSection(true);
+        cam.EnterSection(farm.SectionCutZ, farm.SectionHalfWidth, farm.SectionBottom, 9f);
+    }
+
+    public void ExitSection()
+    {
+        if (!InSection) return;
+        cam.ExitSection();
+        farm.SetSection(false);
+        SetPickColliders(true);
     }
 
     void OnSurface(bool under)
@@ -144,7 +167,9 @@ public class FarmNavigator : MonoBehaviour
 
     bool IsOverUi(Vector2 guiPos)
     {
-        if (Current != null && backRect.Contains(guiPos)) return true;
+        if ((Current != null || InSection) && backRect.Contains(guiPos)) return true;
+        if (cam.CurrentMode == FarmCamera.Mode.Overview && sectionRect.Contains(guiPos)) return true;
+        if (Current != null && feedRect.Contains(guiPos)) return true;
         if (conditions != null && conditions.IsOverUi(guiPos)) return true;
         return Current != null && panel != null && panel.PanelRect.Contains(guiPos);
     }
@@ -160,6 +185,7 @@ public class FarmNavigator : MonoBehaviour
         if (e.type == EventType.KeyDown && e.keyCode == KeyCode.Escape)
         {
             if (conditions != null && conditions.ShowAssumptions) { conditions.ShowAssumptions = false; e.Use(); }
+            else if (InSection) { ExitSection(); e.Use(); }
             else if (Current != null) { ExitCage(); e.Use(); }
         }
 
@@ -169,11 +195,14 @@ public class FarmNavigator : MonoBehaviour
         hint.fontSize = sub.fontSize = Mathf.RoundToInt(fs * 0.9f);
         title.fontSize = Mathf.RoundToInt(fs * 1.4f);
         empty.fontSize = Mathf.RoundToInt(fs * 1.1f);
+        boxTitle.fontSize = scaleText.fontSize = Mathf.RoundToInt(fs * 0.9f);
+        boxText.fontSize = Mathf.RoundToInt(fs * 0.8f);
 
         switch (cam.CurrentMode)
         {
             case FarmCamera.Mode.Overview: DrawOverview(e, fs); break;
             case FarmCamera.Mode.Cage: DrawCage(fs); break;
+            case FarmCamera.Mode.Section: DrawSection(fs); break;
         }
     }
 
@@ -187,6 +216,14 @@ public class FarmNavigator : MonoBehaviour
         // Con la ventana de supuestos abierta no se dibujan etiquetas ni tooltip encima.
         if (conditions != null && conditions.ShowAssumptions) { SetHover(null); return; }
         DrawCageLabels();
+
+        float pad = Screen.height * 0.02f;
+        var sc = new GUIContent("Corte lateral ▸");
+        var ss = button.CalcSize(sc);
+        sectionRect = new Rect(Screen.width - pad - ss.x - fs * 1.5f, Screen.height - pad - ss.y * 1.3f, ss.x + fs * 1.5f, ss.y * 1.3f);
+        if (GUI.Button(sectionRect, sc, button)) { EnterSection(); return; }
+        CurrentReadout(new Vector3(0f, -0.5f, 0f), "Corriente en superficie", pad, Screen.height - pad, fs);
+
         if (Hovered != null)
         {
             // Tooltip junto al cursor (o bajo la etiqueta si el hover es forzado)
@@ -232,11 +269,16 @@ public class FarmNavigator : MonoBehaviour
         }
 
         // Perfil térmico con la profundidad del cardumen (solo jaulas simuladas)
+        float leftBottom = backRect.y - fs * 0.5f;
         if (Current.school != null && conditions != null)
         {
-            var r = new Rect(pad + fs * 0.8f, top + fs * 3f, fs * 1.3f, Screen.height * 0.38f);
+            var r = new Rect(pad + fs * 0.8f, top + fs * 3f, fs * 1.3f, Screen.height * 0.30f);
             conditions.DrawThermalWidget(r, Current.netDepth, Current.school.GetStats().meanDepth, fs);
+            feedRect = DrawFeeding(Current.school, new Rect(pad, r.yMax + fs * 1.8f, fs * 19f, 0f), fs);
         }
+        else feedRect = Rect.zero;
+        var mid = Current.FocusWorld;
+        CurrentReadout(mid, $"Corriente a {-mid.y:F0} m", pad, leftBottom, fs);
 
         if (Current.Source == null)
         {
@@ -248,6 +290,122 @@ public class FarmNavigator : MonoBehaviour
         var help = new GUIContent("Arrastrar: rotar   ·   Rueda: zoom");
         var hs = hint.CalcSize(help);
         GUI.Label(new Rect((Screen.width - hs.x) * 0.5f, Screen.height - hs.y - fs, hs.x, hs.y), help, hint);
+    }
+
+    /// Recuadro de alimentación de una jaula simulada; devuelve su rectángulo.
+    Rect DrawFeeding(FishSchool s, Rect at, float fs)
+    {
+        var meal = s.Meal;
+        string state;
+        if (meal.active) state = $"Comida en curso · {meal.elapsed:F0} / {s.mealSeconds:F0} s";
+        else if (s.FeedingTime) state = "Comida terminada · quedan pellets en el agua";
+        else if (s.NextMealIn >= 0f) state = $"Próxima comida automática en {s.NextMealIn:F0} s";
+        else state = "Sin comidas automáticas (" + (conditions != null && conditions.time == TimeOfDay.Noche ? "noche" : "ayuno") + ")";
+        string counts = meal.id == 0 ? "Todavía no hay comidas."
+            : $"Ración {meal.ration} pellets · lanzados {meal.delivered}\nComidos {meal.eaten} · aún en el agua {meal.InWater}\nSalieron por la red sin comerse: {meal.lost}";
+        int hungry = s.HungryCount, n = s.ActiveCount;
+        string appetite = $"Con hambre: {hungry} de {n} peces ({(n > 0 ? hungry * 100f / n : 0f):F0} %)";
+
+        float lineH = sub.fontSize * 1.45f, w = at.width, p = fs * 0.5f;
+        var last = s.LastMeal;
+        bool showLast = last.id > 0 && last.id != meal.id;
+        float h = p * 2f + lineH * (showLast ? 9.7f : 8.4f) + fs * 2.2f;
+        var box = new Rect(at.x, at.y, w, h);
+        GUI.Box(box, GUIContent.none, panelBox);
+        float y = box.y + p;
+        GUI.Label(new Rect(box.x + p, y, w - 2f * p, lineH), "Alimentación", boxTitle);
+        y += lineH * 1.1f;
+        GUI.enabled = !meal.active;
+        if (GUI.Button(new Rect(box.x + p, y, w - 2f * p, fs * 1.9f), meal.active ? "Comida en curso…" : "Alimentar ahora", button))
+            s.FeedNow();
+        GUI.enabled = true;
+        y += fs * 2.2f;
+        GUI.Label(new Rect(box.x + p, y, w - 2f * p, lineH), state, boxText); y += lineH;
+        GUI.Label(new Rect(box.x + p, y, w - 2f * p, lineH), appetite, boxText); y += lineH;
+        GUI.Label(new Rect(box.x + p, y, w - 2f * p, lineH * 3f), counts, boxText); y += lineH * 3.1f;
+
+        // Métrica: alimento no consumido de la comida
+        bool done = meal.id > 0 && !s.FeedingTime;
+        string pct = meal.delivered > 0 ? $"{meal.Unconsumed * 100f:F0} %" : "—";
+        string tag = meal.delivered == 0 ? "" : meal.partial ? " (parcial)" : done ? " (final)" : " (en curso)";
+        GUI.Label(new Rect(box.x + p, y, w - 2f * p, lineH * 1.2f), $"Alimento no consumido: {pct}{tag}", boxTitle);
+        y += lineH * 1.25f;
+        var bar = new Rect(box.x + p, y, w - 2f * p, fs * 0.45f);
+        GUI.DrawTexture(bar, texBarBg);
+        if (meal.delivered > 0)
+        {
+            float eaten = meal.eaten / (float)meal.delivered, lost = meal.Unconsumed;
+            GUI.DrawTexture(new Rect(bar.x, bar.y, bar.width * eaten, bar.height), texEaten);
+            GUI.DrawTexture(new Rect(bar.xMax - bar.width * lost, bar.y, bar.width * lost, bar.height), texLost);
+        }
+        // La comida anterior, terminada, queda a la vista mientras corre la siguiente.
+        if (showLast)
+            GUI.Label(new Rect(box.x + p, bar.yMax + lineH * 0.3f, w - 2f * p, lineH),
+                      $"Comida anterior: {last.Unconsumed * 100f:F0} % no consumido{(last.partial ? " (parcial)" : "")}", boxText);
+        return box;
+    }
+
+    /// Corriente en `world` (texto) en un recuadro cuyo borde inferior queda en `bottom`;
+    /// `x` es su borde izquierdo (o el derecho, con alignRight).
+    void CurrentReadout(Vector3 world, string what, float x, float bottom, float fs, bool alignRight = false)
+    {
+        var f = CurrentField.Instance;
+        if (f == null) return;
+        var c = new GUIContent($"{what}: {f.Describe(world)}\nIntensidad {CurrentField.Labels[(int)f.strength].ToLowerInvariant()} · " +
+                               $"hora de marea {f.TideHours(Time.time):F1} de {CurrentField.RealTidalPeriodHours:F2} h");
+        var sz = hint.CalcSize(c);
+        GUI.Label(new Rect(alignRight ? x - sz.x : x, bottom - sz.y, sz.x, sz.y), c, hint);
+    }
+
+    /// Corte lateral: escala de profundidad, rótulos y botón para volver.
+    void DrawSection(float fs)
+    {
+        float pad = Screen.height * 0.02f;
+        float top = FarmUi.TopInset + pad;
+        var bc = new GUIContent("← Volver   (Esc)");
+        var bs = button.CalcSize(bc);
+        backRect = new Rect(pad, Screen.height - pad - bs.y * 1.3f, bs.x + fs * 1.5f, bs.y * 1.3f);
+        if (GUI.Button(backRect, bc, button)) { ExitSection(); return; }
+
+        var tc = new GUIContent("Corte lateral · visto desde el sur");
+        var sc = new GUIContent($"Escala vertical exagerada ×{cam.SectionExaggeration:F1} · Arrastrar: mover · Rueda: acercar");
+        var tsz = title.CalcSize(tc);
+        var ssz = sub.CalcSize(sc);
+        float tw = Mathf.Max(tsz.x, ssz.x) + fs * 1.5f;
+        GUI.Box(new Rect((Screen.width - tw) * 0.5f, top - fs * 0.2f, tw, tsz.y + ssz.y + fs * 0.5f), GUIContent.none, panelBox);
+        GUI.Label(new Rect((Screen.width - tsz.x) * 0.5f, top, tsz.x, tsz.y), tc, title);
+        GUI.Label(new Rect((Screen.width - ssz.x) * 0.5f, top + tsz.y, ssz.x, ssz.y), sc, sub);
+
+        // Escala de profundidad a la izquierda
+        float z = farm.SectionCutZ + 0.2f;
+        float camX = cam.transform.position.x, left = camX - (cam.Cam.projectionMatrix.m00 > 0f ? 1f / cam.Cam.projectionMatrix.m00 : 0f);
+        for (int d = 0; d <= -farm.SectionBottom; d += 5)
+        {
+            var g = WorldToGui(new Vector3(left, -d, z));
+            if (g.y < FarmUi.TopInset + fs || g.y > backRect.y - fs * 0.6f) continue;
+            var dc = new GUIContent(d == 0 ? "0 m (superficie)" : $"{d} m");
+            var dsz = scaleText.CalcSize(dc);
+            GUI.DrawTexture(new Rect(0f, g.y - 0.75f, fs * 1.2f, 1.5f), Texture2D.whiteTexture);
+            GUI.Label(new Rect(fs * 1.4f, g.y - dsz.y * 0.5f, dsz.x, dsz.y), dc, scaleText);
+        }
+
+        // Rótulos
+        var m = farm.ModuleBounds;
+        var firstCage = farm.Cages[0];
+        float cx = firstCage.transform.position.x;
+        DrawWorldLabel(new Vector3(cx, -firstCage.netDepth - 0.3f, z), $"Red ({firstCage.netDepth:F0} m)", hint, below: true);
+        float bedC = farm.BedY(0f, farm.SectionCutZ);
+        DrawWorldLabel(new Vector3(0f, bedC - 1f, z), $"Fondo de fango y sedimento · {-bedC:F0} m", hint, below: true);
+        foreach (var a in farm.Anchors)
+        {
+            if (Mathf.Abs(a.z - m.yMin) > 1f) continue; // solo las líneas de este lado, a lo largo del corte
+            DrawWorldLabel(new Vector3(a.x, a.y - 1f, z), "Ancla", hint, below: true);
+            var mid = Vector3.Lerp(new Vector3(Mathf.Sign(a.x) * (Mathf.Abs(a.x) - farm.mooringScope * farm.seabedDepth), 0f, z), a, 0.35f);
+            mid.y = Mathf.Lerp(0f, a.y, 0.55f);
+            DrawWorldLabel(mid, "Línea de fondeo\n(cabo arriba, cadena abajo)", hint);
+        }
+        CurrentReadout(new Vector3(m.xMin - 28f, -0.5f, farm.SectionCutZ), "Corriente en superficie", Screen.width - pad,
+                       Screen.height - pad, fs, alignRight: true);
     }
 
     Vector2 WorldToGui(Vector3 world)
@@ -307,13 +465,14 @@ public class FarmNavigator : MonoBehaviour
         }
     }
 
-    void DrawWorldLabel(Vector3 world, string text, GUIStyle style)
+    void DrawWorldLabel(Vector3 world, string text, GUIStyle style, bool below = false)
     {
         var sp = cam.Cam.WorldToScreenPoint(world);
-        if (sp.z <= 0f) return;
+        if (sp.z <= 0f || sp.x < 0f || sp.x > Screen.width) return;
         var content = new GUIContent(text);
         var size = style.CalcSize(content);
-        GUI.Label(new Rect(sp.x - size.x * 0.5f, Screen.height - sp.y - size.y, size.x, size.y), content, style);
+        float y = Screen.height - sp.y - (below ? 0f : size.y);
+        GUI.Label(new Rect(sp.x - size.x * 0.5f, y, size.x, size.y), content, style);
     }
 
     void InitStyles()
@@ -354,6 +513,14 @@ public class FarmNavigator : MonoBehaviour
             active = { textColor = Color.white, background = texButtonHover },
             padding = new RectOffset(12, 12, 6, 6),
         };
+        texBox = SolidTex(new Color(0.02f, 0.08f, 0.13f, 0.85f));
+        texBarBg = SolidTex(new Color(1f, 1f, 1f, 0.15f));
+        texEaten = SolidTex(new Color(0.35f, 0.85f, 0.45f, 0.95f));
+        texLost = SolidTex(new Color(0.95f, 0.45f, 0.20f, 0.95f));
+        panelBox = new GUIStyle { normal = { background = texBox } };
+        boxTitle = new GUIStyle(GUI.skin.label) { fontStyle = FontStyle.Bold, wordWrap = false, normal = { textColor = Color.white } };
+        boxText = new GUIStyle(GUI.skin.label) { wordWrap = false, normal = { textColor = new Color(0.8f, 0.9f, 0.95f) } };
+        scaleText = new GUIStyle(boxTitle) { normal = { textColor = new Color(0.9f, 0.97f, 1f) } };
     }
 
     static Texture2D SolidTex(Color c)

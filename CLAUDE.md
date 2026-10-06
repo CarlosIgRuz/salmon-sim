@@ -59,6 +59,15 @@ consumidor debe interpolar.
   Botón "ⓘ Supuestos" con cada supuesto, su valor y su fuente (o "supuesto sin fuente").
 - Panel de salmones con resumen (velocidad, profundidad, polarización, orden de
   rotación, concentración) y selección de peces.
+- **Entorno (fase 5):** fondo a ~35 m con pendiente hacia el centro del lago, sedimento y
+  rocas; fondeo con boyas, cabo + cadena y anclas; vista "Corte lateral". Corriente
+  sintética `CurrentField` (marea semidiurna + deriva residual, más lenta hacia el
+  fondo; media 0,13 m/s, residual 0,005–0,065 m/s según NewDEPOMOD/SEPA) con selector
+  Débil / Media / Fuerte y flechas/partículas opcionales.
+- **Alimentación:** tuberías desde los silos del pontón a cada jaula y esparcidor
+  rotatorio; comidas automáticas y "Alimentar ahora"; los peces con hambre suben en
+  frenesí y vuelven a su capa; pellets a 0,095 m/s ±10 % (NewDEPOMOD/SEPA) arrastrados
+  por la corriente; métrica "Alimento no consumido (%)" por comida.
 
 ## Estado
 
@@ -66,10 +75,11 @@ consumidor debe interpolar.
 - Pipeline de visión sobre el video de Katmai → `data/trajectories.csv`.
 - Fases 1–4 en Unity: escena de la salmonera, navegación vista general ↔ jaula,
   cardumen simulado, métricas corregidas, selectores y ventana de supuestos.
-  Capturas en `docs/capturas/`.
+- Fase 5: fondo, fondeo, corte lateral, corriente y alimentación con alimento no
+  consumido. Capturas en `docs/capturas/`.
 
 **Pendiente**
-- Fase 5: alimentación (más allá de los pellets actuales).
+- Fase 6 (se apoya en el fondo y la corriente de la fase 5).
 - Probar el pipeline con video de una salmonera real (no de río).
 - Métricas en Python (`vision/`): conteo, velocidad, polarización, mapa de calor.
 - Demo grabada como plan B.
