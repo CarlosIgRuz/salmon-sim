@@ -3,8 +3,9 @@ using UnityEngine;
 /// <summary>
 /// Navegación entre la vista general y una jaula.
 /// - Vista general: nombre sobre cada jaula; hover la resalta; clic vuela hacia ella.
-/// - Jaula: botón "← Volver" (o Esc) hace el vuelo inverso; se muestran HUD y panel
-///   de salmones si la jaula tiene datos.
+/// - Jaula: botón "← Volver" (o Esc) hace el vuelo inverso; se muestra el panel de
+///   salmones (datos reales o simulación) y, con datos reales, el HUD del video.
+/// Solo la jaula abierta simula su cardumen completo (FishSchool.fullQuality).
 /// Al cruzar la superficie cambia el ambiente y se ocultan/restauran el resto de la escena.
 /// Para probar por código: EnterCage(i), ExitCage(), forcedHover.
 /// </summary>
@@ -12,6 +13,7 @@ public class FarmNavigator : MonoBehaviour
 {
     public SalmonFarmBuilder farm;
     public FarmCamera cam;
+    public SalmonPanel panel;
     [Tooltip("Si es >= 0, fuerza el hover sobre esa jaula (pruebas sin mouse)")]
     public int forcedHover = -1;
 
@@ -20,8 +22,8 @@ public class FarmNavigator : MonoBehaviour
     public FarmCage Current { get; private set; }
     public bool Busy => cam != null && cam.CurrentMode == FarmCamera.Mode.Transition;
 
-    GUIStyle label, labelHover, hint, title, sub, button, empty;
-    Texture2D texLabel, texHover, texButton, texButtonHover;
+    GUIStyle label, labelHover, hint, title, sub, button, empty, badgeReal, badgeSim;
+    Texture2D texLabel, texHover, texButton, texButtonHover, texReal, texSim;
     Rect backRect;
 
     void Start()
@@ -33,7 +35,7 @@ public class FarmNavigator : MonoBehaviour
     void OnDestroy()
     {
         if (cam != null) cam.Clicked -= OnClick;
-        foreach (var t in new[] { texLabel, texHover, texButton, texButtonHover })
+        foreach (var t in new[] { texLabel, texHover, texButton, texButtonHover, texReal, texSim })
             if (t != null) Destroy(t);
     }
 
@@ -51,6 +53,7 @@ public class FarmNavigator : MonoBehaviour
         {
             farm.Isolate(cage);
             farm.SetUnderwater(true);
+            if (cage.school != null) cage.school.fullQuality = true;
             ShowCageUi(true);
         });
     }
@@ -63,6 +66,7 @@ public class FarmNavigator : MonoBehaviour
         {
             farm.Isolate(null);
             farm.SetUnderwater(false);
+            if (Current.school != null) Current.school.fullQuality = false;
             SetPickColliders(true);
             Current = null;
         });
@@ -80,15 +84,22 @@ public class FarmNavigator : MonoBehaviour
             farm.Isolate(null);
             farm.SetUnderwater(false);
         }
+        if (Current != null && Current.school != null) Current.school.fullQuality = under;
     }
 
     void ShowCageUi(bool on)
     {
-        if (Current == null || Current.player == null) return;
-        var hud = Current.player.GetComponent<SalmonHud>();
-        if (hud != null) hud.enabled = on;
-        var panel = Current.player.GetComponent<SalmonPanel>();
-        if (panel != null) panel.enabled = on;
+        if (Current == null) return;
+        if (Current.player != null)
+        {
+            var hud = Current.player.GetComponent<SalmonHud>();
+            if (hud != null) hud.enabled = on;
+        }
+        if (panel != null)
+        {
+            if (on) panel.Source = Current.Source;
+            panel.enabled = on && Current.Source != null;
+        }
     }
 
     void SetPickColliders(bool on)
@@ -121,12 +132,7 @@ public class FarmNavigator : MonoBehaviour
     bool IsOverUi(Vector2 guiPos)
     {
         if (Current != null && backRect.Contains(guiPos)) return true;
-        if (Current != null && Current.player != null)
-        {
-            var panel = Current.player.GetComponent<SalmonPanel>();
-            if (panel != null && panel.PanelRect.Contains(guiPos)) return true;
-        }
-        return false;
+        return Current != null && panel != null && panel.PanelRect.Contains(guiPos);
     }
 
     // ------------------------------------------------------------------ Interfaz
@@ -145,6 +151,7 @@ public class FarmNavigator : MonoBehaviour
 
         float fs = Mathf.Max(11f, Screen.height / 52f);
         label.fontSize = labelHover.fontSize = button.fontSize = Mathf.RoundToInt(fs);
+        badgeReal.fontSize = badgeSim.fontSize = Mathf.RoundToInt(fs * 0.78f);
         hint.fontSize = sub.fontSize = Mathf.RoundToInt(fs * 0.9f);
         title.fontSize = Mathf.RoundToInt(fs * 1.4f);
         empty.fontSize = Mathf.RoundToInt(fs * 1.1f);
@@ -164,14 +171,14 @@ public class FarmNavigator : MonoBehaviour
 
         foreach (var c in farm.Cages)
             if (c.gameObject.activeInHierarchy && c != Hovered)
-                DrawWorldLabel(c.LabelWorld, c.displayName, label);
+                DrawCageLabel(c, label);
         if (Hovered != null)
         {
-            DrawWorldLabel(Hovered.LabelWorld, Hovered.displayName, labelHover);
+            DrawCageLabel(Hovered, labelHover);
             // Tooltip junto al cursor (o bajo la etiqueta si el hover es forzado)
             var tip = new GUIContent($"{Hovered.displayName}  ·  clic para entrar\n{Hovered.description}");
             var ts = hint.CalcSize(tip);
-            Vector2 at = forcedHover >= 0 ? WorldToGui(Hovered.LabelWorld) + new Vector2(-ts.x * 0.5f, 8f)
+            Vector2 at = forcedHover >= 0 ? WorldToGui(Hovered.LabelWorld) + new Vector2(-ts.x * 0.5f, fs * 1.6f)
                                           : e.mousePosition + new Vector2(18f, 18f);
             at.x = Mathf.Clamp(at.x, 4f, Screen.width - ts.x - 4f);
             at.y = Mathf.Clamp(at.y, 4f, Screen.height - ts.y - 4f);
@@ -201,8 +208,15 @@ public class FarmNavigator : MonoBehaviour
         float x = (Screen.width - w) * 0.5f;
         GUI.Label(new Rect(x, pad, w, tsz.y), tc, title);
         GUI.Label(new Rect(x, pad + tsz.y, w, ssz.y), sc, sub);
+        if (!string.IsNullOrEmpty(Current.dataLabel))
+        {
+            var style = Current.isRealData ? badgeReal : badgeSim;
+            var bcont = new GUIContent(Current.dataLabel);
+            var bsz = style.CalcSize(bcont);
+            GUI.Label(new Rect((Screen.width - bsz.x) * 0.5f, pad + tsz.y + ssz.y + fs * 0.3f, bsz.x, bsz.y), bcont, style);
+        }
 
-        if (Current.player == null)
+        if (Current.Source == null)
         {
             var ec = new GUIContent("Jaula sin datos todavía:\nse poblará con salmones simulados.");
             var es = empty.CalcSize(ec);
@@ -218,6 +232,22 @@ public class FarmNavigator : MonoBehaviour
     {
         var sp = cam.Cam.WorldToScreenPoint(world);
         return new Vector2(sp.x, Screen.height - sp.y);
+    }
+
+    /// Nombre de la jaula y, debajo, la etiqueta de origen de los datos (verde: real, naranja: simulación).
+    void DrawCageLabel(FarmCage c, GUIStyle nameStyle)
+    {
+        var sp = cam.Cam.WorldToScreenPoint(c.LabelWorld);
+        if (sp.z <= 0f) return;
+        var nc = new GUIContent(c.displayName);
+        var ns = nameStyle.CalcSize(nc);
+        float y = Screen.height - sp.y - ns.y;
+        GUI.Label(new Rect(sp.x - ns.x * 0.5f, y, ns.x, ns.y), nc, nameStyle);
+        if (string.IsNullOrEmpty(c.dataLabel)) return;
+        var style = c.isRealData ? badgeReal : badgeSim;
+        var bc = new GUIContent(c.dataLabel);
+        var bs = style.CalcSize(bc);
+        GUI.Label(new Rect(sp.x - bs.x * 0.5f, y + ns.y, bs.x, bs.y), bc, style);
     }
 
     void DrawWorldLabel(Vector3 world, string text, GUIStyle style)
@@ -244,6 +274,14 @@ public class FarmNavigator : MonoBehaviour
         };
         labelHover = new GUIStyle(label) { normal = { textColor = new Color(0.08f, 0.08f, 0.08f), background = texHover } };
         hint = new GUIStyle(label) { fontStyle = FontStyle.Normal, alignment = TextAnchor.MiddleLeft };
+        texReal = SolidTex(new Color(0.12f, 0.55f, 0.30f, 0.92f));
+        texSim = SolidTex(new Color(0.85f, 0.45f, 0.10f, 0.92f));
+        badgeReal = new GUIStyle(label)
+        {
+            fontStyle = FontStyle.Bold, padding = new RectOffset(6, 6, 1, 2),
+            normal = { textColor = Color.white, background = texReal },
+        };
+        badgeSim = new GUIStyle(badgeReal) { normal = { textColor = Color.white, background = texSim } };
         title = new GUIStyle(GUI.skin.label)
         {
             alignment = TextAnchor.MiddleCenter, fontStyle = FontStyle.Bold, wordWrap = false,

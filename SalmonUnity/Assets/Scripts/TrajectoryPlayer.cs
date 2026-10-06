@@ -7,7 +7,7 @@ using UnityEngine;
 /// Lee data/trajectories.csv (ver CLAUDE.md raíz) y anima un pez por cada id.
 /// Coloca este componente en un GameObject vacío y asigna un prefab de salmón.
 /// </summary>
-public class TrajectoryPlayer : MonoBehaviour
+public class TrajectoryPlayer : MonoBehaviour, IFishSource
 {
     [Header("Datos")]
     [Tooltip("Nombre del archivo dentro de Assets/StreamingAssets")]
@@ -21,6 +21,8 @@ public class TrajectoryPlayer : MonoBehaviour
 
     [Header("Peces")]
     public GameObject fishPrefab;
+    [Tooltip("Escala de cada pez (1 = salmón de ~0,8 m)")]
+    public float fishScale = 1.3f;
     public float turnSpeed = 6f;
 
     [Header("Orientación")]
@@ -54,6 +56,7 @@ public class TrajectoryPlayer : MonoBehaviour
             var go = fishPrefab != null ? Instantiate(fishPrefab, transform)
                                         : CreatePlaceholder();
             go.name = $"Salmon_{id}";
+            go.transform.localScale *= fishScale;
             go.transform.localPosition = tracks[id][0].p;
             go.transform.rotation = UpstreamRotation();
             // Collider simple para poder seleccionar el pez con un clic (raycast).
@@ -74,14 +77,6 @@ public class TrajectoryPlayer : MonoBehaviour
 
     // ---------- Consulta para el panel / selección ----------
 
-    public struct FishInfo
-    {
-        public int id;
-        public float apparentSpeed;   // m/s respecto a la cámara (velocidad con ventana)
-        public float cameraDistance;  // m, a partir de z (tamaño aparente)
-        public float height;          // m sobre el borde inferior de la imagen (de cy)
-    }
-
     readonly List<int> fishIds = new();
     readonly Dictionary<Transform, int> fishByTransform = new();
 
@@ -101,23 +96,69 @@ public class TrajectoryPlayer : MonoBehaviour
         return false;
     }
 
-    /// Llena `into` con los peces visibles en el tiempo actual, ordenados por ID.
-    public void GetVisibleFish(List<FishInfo> into)
+    // ---------- IFishSource (panel) ----------
+
+    static readonly string[] ColumnNames = { "ID", "Vel. aparente\n(m/s)", "Dist. a cámara\n(m)", "Altura\n(m)" };
+    public string[] Columns => ColumnNames;
+    public string Notes =>
+        "Vel. aparente: desplazamiento respecto a la cámara (promedio en ±0,5 s), no el " +
+        "esfuerzo de nado; ≈0 si el pez se mantiene quieto contra la corriente.\n" +
+        "Dist. a cámara: estimada por el tamaño aparente del pez (fija para cada pez).\n" +
+        "Altura: posición vertical en la imagen, medida desde el borde inferior.\n" +
+        "Clic en una fila o en un pez para resaltarlo; otro clic lo deselecciona.";
+
+    /// Filas: velocidad aparente (m/s), distancia a la cámara (m, de z), altura en la imagen (m, de cy).
+    public void GetRows(List<FishRow> into)
     {
         into.Clear();
         foreach (int id in fishIds)
         {
             if (!IsVisible(id)) continue;
             var p = fish[id].localPosition;
-            into.Add(new FishInfo
+            into.Add(new FishRow
             {
                 id = id,
-                apparentSpeed = Velocity(tracks[id], CurrentTime).magnitude,
-                cameraDistance = p.z,
-                height = p.y + cageHeight * 0.5f,
+                c1 = Velocity(tracks[id], CurrentTime).magnitude,
+                c2 = p.z,
+                c3 = p.y + cageHeight * 0.5f,
             });
         }
     }
+
+    /// Resumen de los peces visibles. La profundidad sale de la altura en la imagen
+    /// mapeada a la jaula, y la polarización de la velocidad aparente.
+    public SchoolStats GetStats()
+    {
+        var st = new SchoolStats();
+        Vector3 dirSum = Vector3.zero;
+        int nMoving = 0;
+        foreach (int id in fishIds)
+        {
+            if (!IsVisible(id)) continue;
+            var v = Velocity(tracks[id], CurrentTime);
+            st.count++;
+            st.meanSpeed += v.magnitude;
+            st.meanDepth += -fish[id].position.y;
+            if (v.sqrMagnitude > 0.0025f) { dirSum += v.normalized; nMoving++; }
+        }
+        if (st.count > 0) { st.meanSpeed /= st.count; st.meanDepth /= st.count; }
+        st.polarization = nMoving > 0 ? dirSum.magnitude / nMoving : 0f;
+        return st;
+    }
+
+    public bool TryPick(Ray ray, out int id)
+    {
+        Physics.SyncTransforms(); // los peces se mueven por transform, sin Rigidbody
+        id = -1;
+        return Physics.Raycast(ray, out var hit, 500f) && TryGetId(hit.transform, out id);
+    }
+
+    readonly RendererHighlighter highlighter = new();
+
+    public void SetSelection(int id, Color highlight, float emission, float dimFactor) =>
+        highlighter.Apply(fishIds, GetFish, id, highlight, emission, dimFactor);
+
+    void OnDestroy() => highlighter.Dispose();
 
     void Load(string path)
     {

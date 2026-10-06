@@ -2,16 +2,16 @@ using System.Collections.Generic;
 using UnityEngine;
 
 /// <summary>
-/// Panel derecho (IMGUI) con una tabla de los salmones visibles y selección:
-/// clic en una fila o sobre un pez en 3D lo resalta en amarillo y atenúa al resto.
-/// No modifica los materiales compartidos de FishFactory: atenúa con
-/// MaterialPropertyBlock y usa una copia propia del material para el resaltado
-/// (el emissive de URP necesita un keyword, que un property block no puede activar).
+/// Panel derecho (IMGUI) de la jaula abierta: resumen (nº de peces, velocidad y
+/// profundidad medias, polarización), tabla de salmones y selección (clic en una
+/// fila o sobre un pez en 3D lo resalta en amarillo y atenúa al resto).
+/// Funciona con cualquier <see cref="IFishSource"/>: datos reales (TrajectoryPlayer)
+/// o simulación (FishSchool). Solo dibuja las filas visibles del scroll, así que
+/// aguanta cientos de peces.
 /// </summary>
 public class SalmonPanel : MonoBehaviour
 {
-    public TrajectoryPlayer player;
-    [Tooltip("Segundos entre actualizaciones de la tabla")]
+    [Tooltip("Segundos entre actualizaciones de la tabla y el resumen")]
     public float refreshInterval = 0.25f;
 
     [Header("Resaltado")]
@@ -20,6 +20,23 @@ public class SalmonPanel : MonoBehaviour
     [Tooltip("Multiplicador de color para los peces no seleccionados")]
     [Range(0f, 1f)] public float dimFactor = 0.55f;
 
+    IFishSource source;
+    /// Jaula que muestra el panel. Al cambiarla se borra la selección.
+    public IFishSource Source
+    {
+        get => source;
+        set
+        {
+            if (value == source) return;
+            source?.SetSelection(-1, highlightColor, highlightEmission, dimFactor);
+            source = value;
+            SelectedId = -1;
+            rows.Clear();
+            nextRefresh = 0f;
+            scroll = Vector2.zero;
+        }
+    }
+
     /// ID seleccionado, o -1. Se mantiene aunque el pez salga de cuadro.
     public int SelectedId { get; private set; } = -1;
 
@@ -27,9 +44,11 @@ public class SalmonPanel : MonoBehaviour
     public void Toggle(int id) { if (SelectedId == id) SelectedId = -1; else Select(id); }
     public void ClearSelection() => SelectedId = -1;
 
-    readonly List<TrajectoryPlayer.FishInfo> rows = new();
+    readonly List<FishRow> rows = new();
+    SchoolStats stats;
     float nextRefresh;
     Vector2 scroll;
+    float viewHeight = 400f;
     bool scrollToSelected;
     Rect panelRect;
     Vector2? pressPos;
@@ -40,85 +59,27 @@ public class SalmonPanel : MonoBehaviour
 
     void Update()
     {
-        if (player == null) return;
+        if (source == null) return;
         if (Time.unscaledTime >= nextRefresh)
         {
             nextRefresh = Time.unscaledTime + refreshInterval;
-            player.GetVisibleFish(rows);
+            source.GetRows(rows);
+            stats = source.GetStats();
         }
-        ApplyLooks();
+        source.SetSelection(SelectedId, highlightColor, highlightEmission, dimFactor);
     }
 
-    // ---------- Resaltado ----------
-
-    enum Look { Normal, Dim, Selected }
-    readonly Dictionary<int, Look> applied = new();
-    readonly Dictionary<Renderer, Material> originalMat = new();
-    readonly Dictionary<Material, Material> highlightMats = new(); // original -> copia resaltada
-    MaterialPropertyBlock mpb;
-    static readonly int BaseColorId = Shader.PropertyToID("_BaseColor");
-    static readonly int ColorId = Shader.PropertyToID("_Color");
-
-    void ApplyLooks()
+    void OnDisable()
     {
-        foreach (int id in player.FishIds)
-        {
-            var want = id == SelectedId ? Look.Selected
-                     : SelectedId >= 0 ? Look.Dim : Look.Normal;
-            if (applied.TryGetValue(id, out var have) ? have == want : want == Look.Normal) continue;
-            // Se aplica también a peces ocultos: al reaparecer conservan su aspecto.
-            SetLook(player.GetFish(id), want);
-            applied[id] = want;
-        }
-    }
-
-    void SetLook(Transform root, Look look)
-    {
-        if (root == null) return;
-        mpb ??= new MaterialPropertyBlock();
-        foreach (var r in root.GetComponentsInChildren<Renderer>(true))
-        {
-            if (!originalMat.TryGetValue(r, out var orig)) originalMat[r] = orig = r.sharedMaterial;
-            if (orig == null) continue;
-            switch (look)
-            {
-                case Look.Normal:
-                    r.sharedMaterial = orig;
-                    r.SetPropertyBlock(null);
-                    break;
-                case Look.Dim:
-                    r.sharedMaterial = orig;
-                    var c = orig.color * dimFactor;
-                    c.a = orig.color.a;
-                    mpb.Clear();
-                    mpb.SetColor(BaseColorId, c);
-                    mpb.SetColor(ColorId, c);
-                    r.SetPropertyBlock(mpb);
-                    break;
-                case Look.Selected:
-                    r.SetPropertyBlock(null);
-                    r.sharedMaterial = HighlightFor(orig);
-                    break;
-            }
-        }
-    }
-
-    Material HighlightFor(Material orig)
-    {
-        if (highlightMats.TryGetValue(orig, out var m)) return m;
-        m = new Material(orig) { name = orig.name + " (resaltado)", color = highlightColor };
-        if (m.HasProperty("_EmissionColor"))
-        {
-            m.EnableKeyword("_EMISSION");
-            m.SetColor("_EmissionColor", highlightColor * highlightEmission);
-            m.globalIlluminationFlags = MaterialGlobalIlluminationFlags.RealtimeEmissive;
-        }
-        return highlightMats[orig] = m;
+        // Devuelve el aspecto normal a los peces si se cierra el panel.
+        source?.SetSelection(-1, highlightColor, highlightEmission, dimFactor);
+        SelectedId = -1;
     }
 
     void OnDestroy()
     {
-        foreach (var m in highlightMats.Values) Destroy(m);
+        foreach (var t in new[] { texPanel, texRowSel, texRowHover, texTile, texBar, texBarBg })
+            if (t != null) Destroy(t);
     }
 
     // ---------- Selección con clic en 3D ----------
@@ -127,18 +88,15 @@ public class SalmonPanel : MonoBehaviour
     {
         var cam = Camera.main;
         if (cam == null) return;
-        Physics.SyncTransforms(); // los peces se mueven por transform, sin Rigidbody
         var ray = cam.ScreenPointToRay(new Vector3(guiPos.x, Screen.height - guiPos.y, 0f));
-        if (Physics.Raycast(ray, out var hit, 500f) && player.TryGetId(hit.transform, out int id))
-            Toggle(id);
+        if (source.TryPick(ray, out int id)) Toggle(id);
     }
 
     // ---------- Interfaz ----------
 
-    GUIStyle title, header, cell, cellSel, note, rowBg, rowBgSel, panelBg;
-    Texture2D texPanel, texRowSel, texRowHover;
+    GUIStyle title, header, cell, cellSel, note, rowBg, rowBgSel, panelBg, tile, tileValue, tileLabel;
+    Texture2D texPanel, texRowSel, texRowHover, texTile, texBar, texBarBg;
     static readonly float[] ColW = { 0.16f, 0.28f, 0.28f, 0.28f };
-    static readonly string[] ColNames = { "ID", "Vel. aparente\n(m/s)", "Dist. a cámara\n(m)", "Altura\n(m)" };
 
     static Texture2D Solid(Color c)
     {
@@ -154,6 +112,9 @@ public class SalmonPanel : MonoBehaviour
         texPanel = Solid(new Color(0.02f, 0.10f, 0.16f, 0.82f));
         texRowSel = Solid(new Color(1f, 0.85f, 0.05f, 0.35f));
         texRowHover = Solid(new Color(1f, 1f, 1f, 0.08f));
+        texTile = Solid(new Color(1f, 1f, 1f, 0.07f));
+        texBar = Solid(new Color(0.45f, 0.85f, 1f, 0.9f));
+        texBarBg = Solid(new Color(1f, 1f, 1f, 0.12f));
         panelBg = new GUIStyle { normal = { background = texPanel } };
         title = new GUIStyle(GUI.skin.label) { fontStyle = FontStyle.Bold, normal = { textColor = Color.white } };
         header = new GUIStyle(GUI.skin.label) { fontStyle = FontStyle.Bold, alignment = TextAnchor.LowerCenter,
@@ -163,17 +124,23 @@ public class SalmonPanel : MonoBehaviour
         note = new GUIStyle(GUI.skin.label) { wordWrap = true, normal = { textColor = new Color(0.75f, 0.85f, 0.9f) } };
         rowBg = new GUIStyle { hover = { background = texRowHover } };
         rowBgSel = new GUIStyle { normal = { background = texRowSel }, hover = { background = texRowSel } };
+        tile = new GUIStyle { normal = { background = texTile } };
+        tileValue = new GUIStyle(GUI.skin.label) { fontStyle = FontStyle.Bold, alignment = TextAnchor.UpperLeft,
+                                                   normal = { textColor = Color.white } };
+        tileLabel = new GUIStyle(GUI.skin.label) { alignment = TextAnchor.UpperLeft, wordWrap = false,
+                                                   normal = { textColor = new Color(0.7f, 0.9f, 1f) } };
     }
 
     void OnGUI()
     {
-        if (player == null) return;
+        if (source == null) return;
         InitStyles();
 
         float fs = Mathf.Max(11f, Screen.height / 50f);
         title.fontSize = Mathf.RoundToInt(fs * 1.15f);
         header.fontSize = cell.fontSize = cellSel.fontSize = Mathf.RoundToInt(fs);
-        note.fontSize = Mathf.RoundToInt(fs * 0.85f);
+        note.fontSize = tileLabel.fontSize = Mathf.RoundToInt(fs * 0.85f);
+        tileValue.fontSize = Mathf.RoundToInt(fs * 1.25f);
         float rowH = fs * 1.7f;
 
         float pad = Screen.height * 0.02f;
@@ -196,13 +163,15 @@ public class SalmonPanel : MonoBehaviour
                                      panelRect.width - 2f * inner, panelRect.height - 2f * inner));
         float areaW = panelRect.width - 2f * inner;
 
-        GUILayout.Label($"Salmones visibles: {rows.Count}", title);
+        GUILayout.Label("Resumen de la jaula", title);
+        DrawSummary(areaW, fs);
+        GUILayout.Space(fs * 0.5f);
 
         // Encabezado
         var hr = GUILayoutUtility.GetRect(areaW, fs * 4.2f); // hasta 3 líneas
-        DrawCells(hr, ColNames, header);
+        DrawCells(hr, source.Columns, header);
 
-        // Filas con scroll
+        // Filas con scroll: solo se dibujan las visibles.
         int selIdx = rows.FindIndex(f => f.id == SelectedId);
         if (scrollToSelected && selIdx >= 0 && e.type == EventType.Layout)
         {
@@ -211,49 +180,66 @@ public class SalmonPanel : MonoBehaviour
         }
         scroll = GUILayout.BeginScrollView(scroll, false, true, GUIStyle.none, GUI.skin.verticalScrollbar);
         float rowW = areaW - GUI.skin.verticalScrollbar.fixedWidth - 4f;
+        var all = GUILayoutUtility.GetRect(rowW, rowH * rows.Count);
+        int first = Mathf.Max(0, Mathf.FloorToInt(scroll.y / rowH));
+        int last = Mathf.Min(rows.Count, first + Mathf.CeilToInt(viewHeight / rowH) + 2);
         var vals = new string[4];
-        foreach (var f in rows)
+        for (int i = first; i < last; i++)
         {
+            var f = rows[i];
             bool sel = f.id == SelectedId;
-            var rr = GUILayoutUtility.GetRect(rowW, rowH);
+            var rr = new Rect(all.x, all.y + i * rowH, rowW, rowH);
             if (GUI.Button(rr, GUIContent.none, sel ? rowBgSel : rowBg)) Toggle(f.id);
             vals[0] = f.id.ToString();
-            vals[1] = f.apparentSpeed.ToString("F2");
-            vals[2] = f.cameraDistance.ToString("F1");
-            vals[3] = f.height.ToString("F1");
+            vals[1] = f.c1.ToString("F2");
+            vals[2] = f.c2.ToString("F1");
+            vals[3] = f.c3.ToString("F1");
             DrawCells(rr, vals, sel ? cellSel : cell);
         }
         GUILayout.EndScrollView();
+        if (e.type == EventType.Repaint) viewHeight = GUILayoutUtility.GetLastRect().height;
 
         if (SelectedId >= 0 && selIdx < 0)
             GUILayout.Label($"Salmón {SelectedId} seleccionado: fuera de cuadro.", cellSel);
 
         GUILayout.Space(pad * 0.4f);
-        GUILayout.Label(
-            "Vel. aparente: desplazamiento respecto a la cámara (promedio en ±0,5 s), no el " +
-            "esfuerzo de nado; ≈0 si el pez se mantiene quieto contra la corriente.\n" +
-            "Dist. a cámara: estimada por el tamaño aparente del pez (fija para cada pez).\n" +
-            "Altura: posición vertical en la imagen, medida desde el borde inferior.\n" +
-            "Clic en una fila o en un pez para resaltarlo; otro clic lo deselecciona.", note);
+        GUILayout.Label(source.Notes, note);
         GUILayout.EndArea();
+    }
+
+    /// 4 recuadros (2×2) con los promedios de la jaula; la polarización lleva una barra 0–1.
+    void DrawSummary(float areaW, float fs)
+    {
+        float gap = fs * 0.4f;
+        float tw = (areaW - gap) * 0.5f, th = fs * 3.7f;
+        var r = GUILayoutUtility.GetRect(areaW, th * 2f + gap);
+        Tile(new Rect(r.x, r.y, tw, th), stats.count.ToString(), "peces");
+        Tile(new Rect(r.x + tw + gap, r.y, tw, th), stats.meanSpeed.ToString("F2") + " m/s", "velocidad media");
+        Tile(new Rect(r.x, r.y + th + gap, tw, th), stats.meanDepth.ToString("F1") + " m", "profundidad media");
+        var pr = new Rect(r.x + tw + gap, r.y + th + gap, tw, th);
+        Tile(pr, stats.polarization.ToString("F2"), "polarización (0–1)");
+        float bw = tw - fs * 1.2f;
+        var bar = new Rect(pr.x + fs * 0.6f, pr.yMax - fs * 0.5f, bw, fs * 0.25f);
+        GUI.DrawTexture(bar, texBarBg);
+        GUI.DrawTexture(new Rect(bar.x, bar.y, bw * Mathf.Clamp01(stats.polarization), bar.height), texBar);
+    }
+
+    void Tile(Rect r, string value, string label)
+    {
+        GUI.Box(r, GUIContent.none, tile);
+        float p = tileValue.fontSize * 0.45f;
+        GUI.Label(new Rect(r.x + p, r.y + p * 0.6f, r.width - 2f * p, tileValue.fontSize * 1.5f), value, tileValue);
+        GUI.Label(new Rect(r.x + p, r.y + p * 0.6f + tileValue.fontSize * 1.45f, r.width - 2f * p, tileLabel.fontSize * 1.5f), label, tileLabel);
     }
 
     static void DrawCells(Rect r, string[] texts, GUIStyle style)
     {
         float x = r.x;
-        for (int i = 0; i < texts.Length; i++)
+        for (int i = 0; i < texts.Length && i < ColW.Length; i++)
         {
             float cw = r.width * ColW[i];
             GUI.Label(new Rect(x, r.y, cw, r.height), texts[i], style);
             x += cw;
         }
-    }
-
-    void OnDisable()
-    {
-        // Devuelve los materiales originales si se desactiva el panel.
-        foreach (var kv in originalMat)
-            if (kv.Key != null) { kv.Key.sharedMaterial = kv.Value; kv.Key.SetPropertyBlock(null); }
-        applied.Clear();
     }
 }

@@ -32,6 +32,26 @@ public static class FishFactory
         return root;
     }
 
+    /// Largo del modelo a escala 1 (m): de la punta del hocico al borde de la cola.
+    public const float ModelLength = 0.83f;
+    static Mesh sharedMesh;
+
+    /// La misma forma que <see cref="Create"/> en una sola malla (sin jerarquía), para GPU instancing.
+    /// El aleteo lo hace el shader SalmonSim/FishInstanced.
+    public static Mesh SharedMesh()
+    {
+        if (sharedMesh != null) return sharedMesh;
+        var parts = new[]
+        {
+            new CombineInstance { mesh = FarmKit.Sphere, transform = Matrix4x4.Scale(new Vector3(0.16f, 0.22f, 0.75f)) },
+            new CombineInstance { mesh = FarmKit.Cube, transform = Matrix4x4.TRS(new Vector3(0f, 0f, -0.37f), Quaternion.identity, new Vector3(0.02f, 0.22f, 0.16f)) },
+            new CombineInstance { mesh = FarmKit.Cube, transform = Matrix4x4.TRS(new Vector3(0f, 0.12f, 0.02f), Quaternion.Euler(-15f, 0f, 0f), new Vector3(0.015f, 0.10f, 0.20f)) },
+        };
+        sharedMesh = new Mesh { name = "SalmonInstanciado" };
+        sharedMesh.CombineMeshes(parts, true, true);
+        return sharedMesh;
+    }
+
     static Transform Part(PrimitiveType type, Transform parent, Vector3 pos, Vector3 scale, bool body)
     {
         var go = GameObject.CreatePrimitive(type);

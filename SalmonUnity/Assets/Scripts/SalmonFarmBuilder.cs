@@ -22,6 +22,12 @@ public class SalmonFarmBuilder : MonoBehaviour
     public float walkwayWidth = 2f;
     [Tooltip("Separación entre hilos de la red dibujada (m)")] public float meshSize = 1f;
 
+    [Header("Peces")]
+    [Tooltip("Margen (m) entre el volumen de datos reales y la red, a cada lado")]
+    public float dataMargin = 1f;
+    [Tooltip("Perfil base de las jaulas simuladas; cada jaula lo varía un poco")]
+    public BehaviorProfile simulatedProfile = new();
+
     [Header("Pontón central")]
     public float pontoonWidth = 12f;
 
@@ -83,6 +89,7 @@ public class SalmonFarmBuilder : MonoBehaviour
         scenery.Add(pontoon.gameObject);
 
         AttachPlayer(cages[0]);
+        for (int i = 1; i < cages.Count; i++) AttachSchool(cages[i], rnd);
         SetupCamera();
         foreach (var l in FindObjectsByType<Light>(FindObjectsSortMode.None))
             if (l.type == LightType.Directional) { sun = l; break; }
@@ -174,27 +181,57 @@ public class SalmonFarmBuilder : MonoBehaviour
         if (nav == null) nav = gameObject.AddComponent<FarmNavigator>();
         nav.farm = this;
         nav.cam = cam.GetComponent<FarmCamera>();
+        nav.panel = GetComponent<SalmonPanel>();
+        if (nav.panel == null) nav.panel = gameObject.AddComponent<SalmonPanel>();
+        nav.panel.enabled = false;
     }
 
+    /// La Jaula 1 recibe el TrajectoryPlayer de la escena: el volumen del video
+    /// (x ±w/2, y ±h/2, z 0..d) se escala para llenar la red dejando dataMargin.
     void AttachPlayer(FarmCage cage)
     {
         var player = FindFirstObjectByType<TrajectoryPlayer>();
         if (player == null) player = new GameObject("Datos Katmai").AddComponent<TrajectoryPlayer>();
-        // El volumen de datos (x ±w/2, y ±h/2, z 0..d) queda centrado en la red.
+        player.cageWidth = cageSize - 2f * dataMargin;
+        player.cageDepth = cageSize - 2f * dataMargin;
+        player.cageHeight = netDepth - 2f * dataMargin;
         player.transform.SetParent(cage.transform, false);
         player.transform.localPosition = cage.FocusLocal + new Vector3(0f, 0f, -player.cageDepth * 0.5f);
         player.transform.localRotation = Quaternion.identity;
         cage.player = player;
-        cage.description = "Datos reales: video submarino de Katmai";
+        cage.isRealData = true;
+        cage.dataLabel = "Datos reales · video Katmai (río)";
+        cage.description = "Peces detectados con YOLO y seguidos con ByteTrack";
 
         var hud = player.GetComponent<SalmonHud>();
         if (hud == null) hud = player.gameObject.AddComponent<SalmonHud>();
         hud.player = player;
         hud.enabled = false;
-        var panel = player.GetComponent<SalmonPanel>();
-        if (panel == null) panel = player.gameObject.AddComponent<SalmonPanel>();
-        panel.player = player;
-        panel.enabled = false;
+    }
+
+    /// Jaulas simuladas: un cardumen boids con el perfil base, variado por jaula
+    /// (cantidad, velocidad, profundidad, giro) para que no se vean todas iguales.
+    void AttachSchool(FarmCage cage, System.Random rnd)
+    {
+        float R(float a, float b) => Rand(rnd, a, b);
+        var go = new GameObject("Cardumen");
+        go.transform.SetParent(cage.transform, false);
+        var school = go.AddComponent<FishSchool>();
+        school.halfSize = cageSize * 0.5f;
+        school.netDepth = netDepth;
+        school.seed = seed * 100 + cage.index;
+        school.clockwise = cage.index % 2 == 0;
+        var p = simulatedProfile.Clone();
+        p.fishCount = Mathf.Round(R(150f, 300f));
+        p.meanSpeed *= R(0.85f, 1.15f);
+        p.fishLength *= R(0.9f, 1.1f);
+        p.preferredDepth = Mathf.Clamp(p.preferredDepth + R(-1f, 1f), 1.5f, netDepth - 1.5f);
+        p.circlingWeight *= R(0.8f, 1.25f);
+        school.profile = p;
+        cage.school = school;
+        cage.isRealData = false;
+        cage.dataLabel = "Simulación · basada en supuestos";
+        cage.description = $"Cardumen boids de {p.fishCount:F0} peces que gira en anillo";
     }
 
     // ------------------------------------------------------------------ Grilla
@@ -228,7 +265,6 @@ public class SalmonFarmBuilder : MonoBehaviour
         var cage = go.AddComponent<FarmCage>();
         cage.index = index;
         cage.displayName = $"Jaula {index + 1}";
-        cage.description = "Vacía: se llenará con simulación";
         cage.size = cageSize;
         cage.netDepth = netDepth;
 

@@ -25,7 +25,7 @@ public class FarmCamera : MonoBehaviour
     public float overviewAutoSpeed = 2.5f;
 
     [Header("Dentro de una jaula")]
-    public float cageDistance = 20f;
+    public float cageDistance = 17f;
     public float minCageDistance = 9f, maxCageDistance = 30f;
     public float cagePitch = 5f;
     public float minCagePitch = -35f;

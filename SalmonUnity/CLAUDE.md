@@ -1,7 +1,8 @@
 # SalmonUnity — Guía para Claude Code
 
-Proyecto Unity que arma una salmonera completa (lago, montañas, grilla de jaulas, pontón) y,
-en la "Jaula 1", anima salmones 3D a partir de `data/trajectories.csv`.
+Proyecto Unity que arma una salmonera completa (lago, montañas, grilla de jaulas, pontón).
+La "Jaula 1" anima salmones a partir de `data/trajectories.csv` (datos reales); las demás
+tienen un cardumen simulado con boids (`FishSchool`).
 
 ## Comandos esenciales con `unity command`
 
@@ -55,7 +56,15 @@ unity command --tag editor   # filtrar por categoría
 ### `TrajectoryPlayer.cs`
 Componente central. Lee `StreamingAssets/trajectories.csv` y crea un GameObject por cada `id` de pez encontrado en el CSV. En cada `Update()` interpola la posición del pez en el tiempo actual y lo mueve suavemente. Si hay un hueco > 1 s entre dos filas consecutivas del mismo pez, lo oculta (oclusión simulada). Expone `CurrentTime`, `VisibleCount` y `Duration` para el HUD.
 
-**Inspector:** `csvFile`, `fps`, `cageWidth/Height/Depth` (metros de la jaula virtual), `fishPrefab` (si es null usa `FishFactory`), `turnSpeed`, `playing`, `speed`.
+**Inspector:** `csvFile`, `fps`, `cageWidth/Height/Depth` (metros de la jaula virtual; `SalmonFarmBuilder` los sobrescribe para llenar la red menos `dataMargin`), `fishPrefab` (si es null usa `FishFactory`), `fishScale`, `turnSpeed`, `playing`, `speed`. Implementa `IFishSource` para el panel.
+
+### `FishSchool.cs` + `BehaviorProfile.cs`
+Cardumen simulado (boids) en coordenadas locales de la jaula (superficie y=0, red |x|,|z| ≤ `halfSize`, fondo −`netDepth`). Reglas: separación, alineación, cohesión, evitar la red (empuje suave + límite duro `hardMargin`: nunca la cruzan), profundidad preferida y giro en anillo (`clockwise`). Vecinos con grilla espacial (counting sort). Se dibuja con `Graphics.RenderMeshInstanced` (malla `FishFactory.SharedMesh()` + shader `SalmonSim/FishInstanced`, que hace el aleteo); sin GameObjects ni colliders por pez (el clic usa un test rayo-esfera).
+- `profile` (`BehaviorProfile`, serializable): nº de peces, largo, velocidad media y variación, aceleración máxima, radios y pesos de cada regla, profundidad preferida y dispersión, peso y radio del anillo. Todo continuo: `BehaviorProfile.Lerp` y `FishSchool.BlendTo(perfil, segundos)` cambian de perfil suavemente. `BehaviorProfileAsset` (ScriptableObject) sirve para guardar presets.
+- `fullQuality`: solo la jaula abierta simula todos los peces; en la vista general cada jaula simula `liteFishCount` (40).
+
+### `IFishSource.cs`
+Contrato entre el panel y una jaula (`Columns`, `Notes`, `GetRows`, `GetStats`, `TryPick`, `SetSelection`), más `RendererHighlighter` (resaltado de peces hechos de Renderers).
 
 ### `SalmonFarmBuilder.cs`
 Componente que arma toda la escena al dar Play. Si no está en la escena, un `[RuntimeInitializeOnLoadMethod]` lo crea con valores por defecto (para cambiarlos, agrégalo a un objeto de la escena).
@@ -63,7 +72,8 @@ Componente que arma toda la escena al dar Play. Si no está en la escena, un `[R
 - Lago (shader `SalmonSim/Water`), orilla/fondo low-poly, montañas y árboles: decoración barata (sin sombras, mallas combinadas).
 - Jaulas cuadradas (`FarmCage`): collar sobre flotadores, baranda, red (cintas + velo semitransparente), lastre, contorno de hover y `BoxCollider` para seleccionarla.
 - Pasillos flotantes entre jaulas y hacia el pontón central (caseta, silos, mástil con antenas); boyas de fondeo.
-- Mueve el `TrajectoryPlayer` de la escena dentro de la "Jaula 1" y le agrega `SalmonHud` y `SalmonPanel` (desactivados en la vista general).
+- Mueve el `TrajectoryPlayer` de la escena dentro de la "Jaula 1" (le agrega `SalmonHud`) y crea un `FishSchool` en cada jaula restante a partir de `simulatedProfile`, variado por jaula. Cada jaula lleva su etiqueta de origen (`dataLabel`: "Datos reales · video Katmai (río)" / "Simulación · basada en supuestos").
+- Crea un único `SalmonPanel` en el objeto de la salmonera; el navegador le asigna la jaula abierta.
 - `SetUnderwater(bool)` cambia el ambiente (niebla de distancia ↔ niebla submarina, sol, color de fondo); `Isolate(cage)` deja visible solo esa jaula.
 
 ### `FarmCage.cs`
@@ -89,7 +99,7 @@ Navegación vista general ↔ jaula. En la vista general: etiqueta con el nombre
 **Pruebas por código:** `EnterCage(i)`, `ExitCage()`, `forcedHover = i` (hover sin mouse). Para capturar a mitad del vuelo, subir `FarmCamera.flightDuration` y congelar con `Time.timeScale = 0` (las llamadas `eval` tardan más que 1,5 s).
 
 ### `SalmonPanel.cs`
-Panel derecho con la tabla de salmones visibles y selección (clic en una fila o en un pez, sin arrastrar). `PanelRect` permite a la cámara ignorar clics sobre el panel.
+Panel derecho de la jaula abierta (cualquier `IFishSource`, asignado en `Source`): resumen (nº de peces, velocidad media, profundidad media, polarización 0–1), tabla con scroll (solo dibuja las filas visibles) y selección (clic en una fila o en un pez, sin arrastrar). `PanelRect` permite a la cámara ignorar clics sobre el panel.
 
 ### `SalmonHud.cs`
 HUD IMGUI (sin Canvas). Muestra en la esquina superior izquierda:
